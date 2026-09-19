@@ -2,6 +2,7 @@ package coverage_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -137,10 +138,15 @@ func TestUnanswerableExclusionCountsAsProtected(t *testing.T) {
 	}
 }
 
-func TestExclusionQuestionsAreBatchedPerDirectory(t *testing.T) {
+func TestExclusionQuestionsAreAskedALevelAtATime(t *testing.T) {
+	// Three levels of twenty directories each: 20 + 400 directories to ask about.
+	// On a Mac every question costs a process, so the number of calls has to
+	// follow the depth of the tree, not the number of directories in it.
 	files := map[string]string{}
-	for i := 0; i < 30; i++ {
-		files[filepath.Join("sub", string(rune('a'+i%26))+string(rune('0'+i/26)), "f.txt")] = "x"
+	for i := 0; i < 20; i++ {
+		for j := 0; j < 20; j++ {
+			files[filepath.Join(fmt.Sprintf("d%02d", i), fmt.Sprintf("s%02d", j), "f.txt")] = "x"
+		}
 	}
 	root := tree(t, files)
 	b := fake.New(backend.TimeMachine, "disk", []string{"/"}, "snap", nil)
@@ -152,10 +158,34 @@ func TestExclusionQuestionsAreBatchedPerDirectory(t *testing.T) {
 	if len(rep.Unprotected()) != 0 {
 		t.Fatalf("nothing should be unprotected here: %+v", rep.Unprotected())
 	}
-	// One call for the root's children, one per directory that has children —
-	// never one call per path.
-	if b.Calls.Paths == 0 || b.Calls.Excluded >= b.Calls.Paths {
-		t.Errorf("questions were not batched: %d calls for %d paths", b.Calls.Excluded, b.Calls.Paths)
+	if b.Calls.Paths < 420 {
+		t.Fatalf("asked about %d paths, want every directory", b.Calls.Paths)
+	}
+	// 420 directories over three levels: a handful of calls, not one per directory.
+	if b.Calls.Excluded > 8 {
+		t.Errorf("%d calls for %d directories; questions must be asked a level at a time",
+			b.Calls.Excluded, b.Calls.Paths)
+	}
+}
+
+func TestAHugeLevelIsSplitIntoSeveralQuestions(t *testing.T) {
+	// A directory with a thousand children must not become one enormous command
+	// line: the questions are chunked.
+	files := map[string]string{}
+	for i := 0; i < 1000; i++ {
+		files[filepath.Join(fmt.Sprintf("d%04d", i), "f.txt")] = "x"
+	}
+	root := tree(t, files)
+	b := fake.New(backend.TimeMachine, "disk", []string{"/"}, "snap", nil)
+
+	if _, err := coverage.Run(context.Background(), coverage.Options{Roots: []string{root}}, protectors(b)); err != nil {
+		t.Fatal(err)
+	}
+	if b.Calls.Excluded < 4 {
+		t.Errorf("%d calls for 1000 directories; a level that big must be split", b.Calls.Excluded)
+	}
+	if b.Calls.Excluded > 20 {
+		t.Errorf("%d calls for 1000 directories; the chunks are too small", b.Calls.Excluded)
 	}
 }
 

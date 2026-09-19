@@ -146,6 +146,7 @@ func Run(ctx context.Context, opts Options, protectors []*Protector) (Report, er
 	home, _ := os.UserHomeDir()
 	w.home = home
 
+	roots := make([]pending, 0, len(opts.Roots))
 	for _, root := range opts.Roots {
 		info, err := os.Lstat(root)
 		if err != nil {
@@ -155,13 +156,13 @@ func Run(ctx context.Context, opts Options, protectors []*Protector) (Report, er
 		if !info.IsDir() {
 			return rep, fmt.Errorf("%s is not a directory", root)
 		}
-		w.rootDev, _ = deviceOf(info)
-		b, f, err := w.visit(ctx, root, 0)
-		if err != nil {
-			return rep, err
+		if w.rootDev == 0 {
+			w.rootDev, _ = deviceOf(info)
 		}
-		rep.TotalBytes += b
-		rep.TotalFiles += f
+		roots = append(roots, pending{path: root, depth: 0})
+	}
+	if err := w.walk(ctx, roots); err != nil {
+		return rep, err
 	}
 	sort.SliceStable(rep.Findings, func(i, j int) bool {
 		if rep.Findings[i].Bytes != rep.Findings[j].Bytes {
@@ -193,31 +194,14 @@ func (w *walker) isRepository(path string) bool {
 	return false
 }
 
-// visit decides what to do with one directory: walk it when a backup keeps it,
-// walk it anyway when a backup keeps something inside it, and otherwise report it
-// as a hole and count what it holds.
-func (w *walker) visit(ctx context.Context, path string, depth int) (int64, int, error) {
-	state, detail := w.statusOf(ctx, path)
-	if state == protectedYes {
-		if depth >= w.opts.MaxDepth {
-			b, f := w.rollup(path)
-			return b, f, nil
-		}
-		return w.dir(ctx, path, depth)
-	}
-	// Nothing keeps this directory itself, but a destination may keep something
-	// deeper: descend so the hole is reported where it really is.
-	if w.claimsBelow(path) && depth < w.opts.MaxDepth {
-		return w.dir(ctx, path, depth)
-	}
-	b, f := w.rollup(path)
-	kind := NoBackup
-	if state == protectedExcluded {
-		kind = Excluded
-	}
-	w.addFinding(Finding{Path: path, Kind: kind, Detail: detail, Bytes: b, Files: f}, true)
-	return b, f, nil
-}
+// protection is what a destination does with a path.
+type protection int
+
+const (
+	protectedYes protection = iota
+	protectedNo
+	protectedExcluded
+)
 
 // claimsBelow reports whether any readable destination covers something strictly
 // inside this directory.
@@ -235,14 +219,6 @@ func (w *walker) claimsBelow(path string) bool {
 	}
 	return false
 }
-
-type protection int
-
-const (
-	protectedYes protection = iota
-	protectedNo
-	protectedExcluded
-)
 
 // statusOf decides whether a path is protected, and when it is not, why.
 func (w *walker) statusOf(ctx context.Context, path string) (protection, string) {
@@ -312,7 +288,12 @@ func (w *walker) exclusion(ctx context.Context, p *Protector, path string) (back
 	return answers[0], nil
 }
 
-// prefetch asks every protector about a whole directory's children in one call.
+// chunkSize is how many paths one exclusion question carries. Big enough that a
+// whole level usually costs one call, small enough to stay well inside the limit
+// on the length of a command line.
+const chunkSize = 256
+
+// prefetch asks every protector about many paths at once, in chunks.
 func (w *walker) prefetch(ctx context.Context, paths []string) {
 	for _, p := range w.protectors {
 		if p.Dest.State != backend.StateOK {
@@ -324,43 +305,128 @@ func (w *walker) prefetch(ctx context.Context, paths []string) {
 				missing = append(missing, path)
 			}
 		}
-		if len(missing) == 0 {
-			continue
-		}
-		answers, err := p.Backend.Excluded(ctx, p.Dest, missing)
-		if err != nil || len(answers) != len(missing) {
-			continue // fall back to one question per path
-		}
-		for i, path := range missing {
-			p.excluded[path] = answers[i]
+		for len(missing) > 0 {
+			n := len(missing)
+			if n > chunkSize {
+				n = chunkSize
+			}
+			batch := missing[:n]
+			missing = missing[n:]
+			answers, err := p.Backend.Excluded(ctx, p.Dest, batch)
+			if err != nil || len(answers) != len(batch) {
+				continue // fall back to one question per path
+			}
+			for i, path := range batch {
+				p.excluded[path] = answers[i]
+			}
 		}
 	}
 }
 
-// dir walks one protected directory, counting what it holds and reporting the
-// holes inside it. It returns the bytes and files below path.
-func (w *walker) dir(ctx context.Context, path string, depth int) (int64, int, error) {
+// pending is a directory waiting to be looked at.
+type pending struct {
+	path  string
+	depth int
+}
+
+// walk visits the tree one depth at a time, so every exclusion question for a
+// whole level is asked in a few calls instead of one call per directory. On a
+// Mac each tmutil call costs about 60 ms, which is minutes of difference over a
+// home directory.
+func (w *walker) walk(ctx context.Context, level []pending) error {
+	// The roots themselves have to be classified before anything is read.
+	level = w.classify(ctx, level)
+
+	for len(level) > 0 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		var children []pending
+		for _, dir := range level {
+			kids, err := w.read(ctx, dir)
+			if err != nil {
+				return err
+			}
+			children = append(children, kids...)
+		}
+		level = w.classify(ctx, children)
+	}
+	return nil
+}
+
+// classify asks about a whole level at once and returns the directories that are
+// kept by a backup and still worth descending into. Everything else is counted
+// here: a hole is rolled up and reported, and a protected directory at the depth
+// limit is counted without being opened.
+func (w *walker) classify(ctx context.Context, dirs []pending) []pending {
+	if len(dirs) == 0 {
+		return nil
+	}
+	paths := make([]string, 0, len(dirs))
+	for _, d := range dirs {
+		paths = append(paths, d.path)
+	}
+	w.prefetch(ctx, paths)
+
+	var keep []pending
+	for _, d := range dirs {
+		state, detail := w.statusOf(ctx, d.path)
+		switch {
+		case state == protectedYes:
+			if d.depth >= w.opts.MaxDepth {
+				b, f := w.rollup(d.path)
+				w.count(b, f)
+				continue
+			}
+			keep = append(keep, d)
+		case w.claimsBelow(d.path) && d.depth < w.opts.MaxDepth:
+			// Nothing keeps this directory itself, but a destination keeps
+			// something deeper: descend so the hole is reported where it is.
+			keep = append(keep, d)
+		default:
+			b, f := w.rollup(d.path)
+			w.count(b, f)
+			kind := NoBackup
+			if state == protectedExcluded {
+				kind = Excluded
+			}
+			w.addFinding(Finding{Path: d.path, Kind: kind, Detail: detail, Bytes: b, Files: f}, true)
+		}
+	}
+	return keep
+}
+
+// count adds to the totals of what was walked.
+func (w *walker) count(bytes int64, files int) {
+	w.rep.TotalBytes += bytes
+	w.rep.TotalFiles += files
+}
+
+// read lists one directory: its files are counted here, and its subdirectories
+// are handed back for the next level.
+func (w *walker) read(ctx context.Context, dir pending) ([]pending, error) {
 	if err := ctx.Err(); err != nil {
-		return 0, 0, err
+		return nil, err
 	}
 	if w.opts.Progress != nil {
-		w.opts.Progress(path)
+		w.opts.Progress(dir.path)
 	}
 	w.rep.Dirs++
 
-	entries, err := os.ReadDir(path)
+	entries, err := os.ReadDir(dir.path)
 	if err != nil {
-		w.addFinding(Finding{Path: path, Kind: Unreadable, Detail: readableError(err)}, false)
-		return 0, 0, nil
+		w.addFinding(Finding{Path: dir.path, Kind: Unreadable, Detail: readableError(err)}, false)
+		return nil, nil
 	}
 
-	var bytes int64
-	var files int
-	var subdirs []string
-	var plainFiles []string
-
+	var (
+		bytes      int64
+		files      int
+		subdirs    []pending
+		plainFiles []string
+	)
 	for _, e := range entries {
-		full := filepath.Join(path, e.Name())
+		full := filepath.Join(dir.path, e.Name())
 		info, err := e.Info()
 		if err != nil {
 			continue
@@ -369,26 +435,29 @@ func (w *walker) dir(ctx context.Context, path string, depth int) (int64, int, e
 		case info.Mode()&os.ModeSymlink != 0:
 			continue // a symlink is not data, and following one walks in circles
 		case e.IsDir():
-			if !w.sameFilesystem(info) {
+			switch {
+			case !w.sameFilesystem(info):
 				w.addFinding(Finding{Path: full, Kind: Skipped,
 					Detail: "another volume (use --cross-filesystems to include it)"}, false)
-				continue
+			case w.isRepository(full):
+				w.addFinding(Finding{Path: full, Kind: Skipped,
+					Detail: "a backup repository, which does not need backing up itself"}, false)
+			case w.skipLocation(full):
+				w.addFinding(Finding{Path: full, Kind: Skipped,
+					Detail: "a folder macOS guards behind a permission prompt (use --all to include it)"}, false)
+			default:
+				subdirs = append(subdirs, pending{path: full, depth: dir.depth + 1})
 			}
-			subdirs = append(subdirs, full)
 		case info.Mode().IsRegular():
 			bytes += info.Size()
 			files++
 			plainFiles = append(plainFiles, full)
 		}
 	}
+	w.count(bytes, files)
 
-	ask := append([]string{}, subdirs...)
-	if w.opts.CheckFiles {
-		ask = append(ask, plainFiles...)
-	}
-	w.prefetch(ctx, ask)
-
-	if w.opts.CheckFiles {
+	if w.opts.CheckFiles && len(plainFiles) > 0 {
+		w.prefetch(ctx, plainFiles)
 		for _, f := range plainFiles {
 			state, detail := w.statusOf(ctx, f)
 			if state == protectedYes {
@@ -405,27 +474,7 @@ func (w *walker) dir(ctx context.Context, path string, depth int) (int64, int, e
 			w.addFinding(Finding{Path: f, Kind: kind, Detail: detail, Bytes: info.Size(), Files: 1}, true)
 		}
 	}
-
-	for _, sub := range subdirs {
-		if w.isRepository(sub) {
-			w.addFinding(Finding{Path: sub, Kind: Skipped,
-				Detail: "a backup repository, which does not need backing up itself"}, false)
-			continue
-		}
-		if w.skipLocation(sub) {
-			w.addFinding(Finding{Path: sub, Kind: Skipped,
-				Detail: "a folder macOS guards behind a permission prompt (use --all to include it)"}, false)
-			continue
-		}
-		b, f, err := w.visit(ctx, sub, depth+1)
-		if err != nil {
-			return bytes, files, err
-		}
-		bytes += b
-		files += f
-	}
-
-	return bytes, files, nil
+	return subdirs, nil
 }
 
 // addFinding records a hole. counted says whether its bytes belong to the
