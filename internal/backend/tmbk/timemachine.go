@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/morass/restorable/internal/backend"
@@ -261,23 +260,44 @@ func (b *Backend) Excluded(ctx context.Context, _ backend.Destination, paths []s
 	if len(paths) == 0 {
 		return nil, nil
 	}
+	for _, p := range paths {
+		if strings.ContainsAny(p, "\n\x00") {
+			// tmutil answers one line per path; a name with a newline in it makes
+			// the answers impossible to tell apart, so it is not asked about.
+			return nil, fmt.Errorf("%q holds a newline, so Time Machine cannot be asked about it", p)
+		}
+	}
 	// "--" so a path can never be read as an option, whatever it is called.
 	args := append([]string{"isexcluded", "--"}, paths...)
 	res, err := b.Runner.Run(ctx, run.Tmutil, args...)
 	if err != nil {
 		return nil, err
 	}
+	if res.ExitCode != 0 {
+		return nil, fmt.Errorf("tmutil isexcluded (exit %d): %s", res.ExitCode, firstLine(res.Stderr))
+	}
 	lines := strings.Split(strings.TrimRight(string(res.Stdout), "\n"), "\n")
+	if len(lines) != len(paths) {
+		// A name holding a newline splits tmutil's answer, and matching answers
+		// to paths by position would then attach one path's verdict to another.
+		return nil, fmt.Errorf("tmutil isexcluded answered with %d lines for %d paths", len(lines), len(paths))
+	}
 	out := make([]backend.Exclusion, len(paths))
-	for i := range paths {
-		if i >= len(lines) {
-			return nil, fmt.Errorf("tmutil isexcluded answered about %d of %d paths", len(lines), len(paths))
+	for i, line := range lines {
+		verdict, answered, ok := strings.Cut(line, "]")
+		if !ok {
+			return nil, fmt.Errorf("tmutil isexcluded: unexpected answer %q", line)
 		}
-		line := lines[i]
-		switch {
-		case strings.HasPrefix(line, "[Excluded]"):
+		// tmutil echoes the path it judged (resolved), so the answer is checked
+		// against the path that was asked about rather than trusted by position.
+		answered = strings.TrimSpace(answered)
+		if answered != "" && !samePath(answered, paths[i]) {
+			return nil, fmt.Errorf("tmutil isexcluded answered about %q when asked about %q", answered, paths[i])
+		}
+		switch verdict + "]" {
+		case "[Excluded]":
 			out[i] = backend.Exclusion{Excluded: true, Reason: b.reason(paths[i])}
-		case strings.HasPrefix(line, "[Included]"):
+		case "[Included]":
 			out[i] = backend.Exclusion{Excluded: false}
 		default:
 			return nil, fmt.Errorf("tmutil isexcluded: unexpected answer %q", line)
@@ -354,51 +374,149 @@ func (b *Backend) List(_ context.Context, _ backend.Destination, snapshot, path 
 }
 
 // Restore copies files out of a mounted backup into target, keeping their
-// absolute layout. Nothing is ever written towards the backup.
+// absolute layout. Nothing is ever written towards the backup, and neither the
+// read nor the write can leave its own directory: both go through an os.Root, so
+// a symlink anywhere along the way — inside the backup or inside the target —
+// cannot lead out of it.
 func (b *Backend) Restore(_ context.Context, _ backend.Destination, snapshot string, files []string, target string) error {
+	dstRoot, err := os.OpenRoot(target)
+	if err != nil {
+		return err
+	}
+	defer dstRoot.Close()
+
 	for _, f := range files {
-		src, err := safe.Join(snapshot, f)
+		src, err := backupPath(snapshot, f)
 		if err != nil {
 			return fmt.Errorf("read %s: %w", f, err)
 		}
-		dst, err := safe.Join(target, f)
+		// The source is opened relative to the backup, not by absolute path.
+		srcRoot, err := os.OpenRoot(snapshot)
 		if err != nil {
-			return fmt.Errorf("restore %s: %w", f, err)
-		}
-		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
 			return err
 		}
-		if err := copyFile(src, dst); err != nil {
+		rel, relErr := filepath.Rel(snapshot, src)
+		if relErr != nil {
+			srcRoot.Close()
+			return relErr
+		}
+		in, err := srcRoot.Open(rel)
+		srcRoot.Close()
+		if err != nil {
+			return fmt.Errorf("read %s: %w", f, err)
+		}
+
+		dstRel := strings.TrimPrefix(filepath.Clean(f), string(filepath.Separator))
+		if _, err := safe.Join(target, f); err != nil {
+			in.Close()
 			return fmt.Errorf("restore %s: %w", f, err)
+		}
+		if err := mkdirAllIn(dstRoot, filepath.Dir(dstRel)); err != nil {
+			in.Close()
+			return fmt.Errorf("restore %s: %w", f, err)
+		}
+		out, err := dstRoot.OpenFile(dstRel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			in.Close()
+			return fmt.Errorf("restore %s: %w", f, err)
+		}
+		_, copyErr := io.Copy(out, in)
+		in.Close()
+		closeErr := out.Close()
+		if copyErr != nil {
+			return fmt.Errorf("restore %s: %w", f, copyErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("restore %s: %w", f, closeErr)
 		}
 	}
 	return nil
 }
 
-// backupPath joins a backup directory and an absolute path from the live disk,
-// refusing anything that would read outside the backup. Time Machine stores each
-// volume under the backup, so the volume directory is part of the snapshot id.
+// mkdirAllIn creates a directory inside a root, one component at a time, so no
+// part of the path can be followed out of it.
+func mkdirAllIn(root *os.Root, dir string) error {
+	if dir == "." || dir == "" || dir == string(filepath.Separator) {
+		return nil
+	}
+	var built string
+	for _, part := range strings.Split(filepath.Clean(dir), string(filepath.Separator)) {
+		if part == "" || part == "." {
+			continue
+		}
+		built = filepath.Join(built, part)
+		if err := root.Mkdir(built, 0o700); err != nil && !os.IsExist(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+// backupPath joins a backup directory and an absolute path from the live disk.
+// A Time Machine backup holds one directory per volume ("Macintosh HD"), and the
+// live path hangs below that, so the volume has to be found rather than assumed.
 func backupPath(snapshot, path string) (string, error) {
+	for _, vol := range volumes(snapshot) {
+		candidate, err := safe.Join(filepath.Join(snapshot, vol), path)
+		if err != nil {
+			return "", err
+		}
+		if _, err := os.Lstat(candidate); err == nil {
+			return candidate, nil
+		}
+	}
+	// No volume directory holds it: fall back to the backup root, which is what
+	// a backup made of one volume with no wrapper looks like (and what tests use).
 	return safe.Join(snapshot, path)
 }
 
-func copyFile(src, dst string) error {
-	in, err := os.Open(src)
+// volumes lists the volume directories inside a backup, newest layout first.
+func volumes(snapshot string) []string {
+	entries, err := os.ReadDir(snapshot)
 	if err != nil {
-		return err
+		return nil
 	}
-	defer in.Close()
-	// O_NOFOLLOW: a restore writes a new file, never through a symlink that is
-	// already sitting at that name.
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0o600)
-	if err != nil {
-		return err
+	var out []string
+	for _, e := range entries {
+		if e.IsDir() && !strings.HasPrefix(e.Name(), ".") {
+			out = append(out, e.Name())
+		}
 	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
-		return err
+	return out
+}
+
+// livePath turns a path inside a backup into the path it came from on the disk,
+// dropping the volume directory Time Machine wraps each volume in.
+func livePath(snapshot, inBackup string) string {
+	rel := strings.TrimPrefix(strings.TrimPrefix(inBackup, snapshot), string(filepath.Separator))
+	if rel == "" {
+		return "/"
 	}
-	return out.Close()
+	parts := strings.SplitN(rel, string(filepath.Separator), 2)
+	if len(parts) == 2 && looksLikeVolume(parts[0]) {
+		return "/" + parts[1]
+	}
+	return "/" + rel
+}
+
+// looksLikeVolume reports whether a directory inside a backup is a volume
+// wrapper rather than the start of a live path. Time Machine names it after the
+// volume ("Macintosh HD", "Data"), and a live path always starts with a
+// lowercase system directory or Users/Applications/Library/Volumes.
+func looksLikeVolume(name string) bool {
+	switch name {
+	case "Users", "Applications", "Library", "System", "Volumes", "opt", "usr",
+		"var", "private", "etc", "bin", "sbin", "tmp", "home", "Network", "cores":
+		return false
+	}
+	return true
+}
+
+// samePath compares what tmutil answered about with what was asked, allowing for
+// the /private prefix it resolves symlinked system directories to.
+func samePath(answered, asked string) bool {
+	a, b := filepath.Clean(answered), filepath.Clean(asked)
+	return a == b || a == "/private"+b || "/private"+a == b
 }
 
 func sameID(a, b string) bool {
@@ -445,7 +563,7 @@ func firstLine(b []byte) string {
 
 // Walk streams what a backup holds under a path: a Time Machine backup is a
 // directory tree, so this is a filesystem walk that never leaves it.
-func (b *Backend) Walk(_ context.Context, _ backend.Destination, snapshot, path string, fn func(backend.File) error) error {
+func (b *Backend) Walk(ctx context.Context, _ backend.Destination, snapshot, path string, fn func(backend.File) error) error {
 	root := snapshot
 	if path != "" {
 		var err error
@@ -454,21 +572,29 @@ func (b *Backend) Walk(_ context.Context, _ backend.Destination, snapshot, path 
 			return err
 		}
 	}
-	return filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+	var unreadable int
+	walkErr := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		if err != nil {
+			unreadable++
 			return nil
 		}
 		info, err := d.Info()
 		if err != nil || info.Mode()&os.ModeSymlink != 0 {
 			return nil
 		}
-		live := "/" + strings.TrimPrefix(strings.TrimPrefix(p, snapshot), "/")
-		if d.IsDir() {
+		if d.IsDir() || !info.Mode().IsRegular() {
 			return nil
 		}
-		if !info.Mode().IsRegular() {
-			return nil
-		}
-		return fn(backend.File{Path: filepath.Clean(live), Size: info.Size()})
+		return fn(backend.File{Path: filepath.Clean(livePath(snapshot, p)), Size: info.Size()})
 	})
+	if walkErr != nil {
+		return walkErr
+	}
+	if unreadable > 0 {
+		return fmt.Errorf("%d places inside the backup could not be read; the sample is not from the whole of it", unreadable)
+	}
+	return nil
 }

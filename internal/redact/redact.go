@@ -26,20 +26,18 @@ func Location(s string) string {
 	if s == "" {
 		return s
 	}
+	// The whole userinfo goes: for S3 and B2 the "user" half is the access key
+	// id, which is a credential in its own right.
 	out := userinfo.ReplaceAllStringFunc(s, func(m string) string {
 		parts := userinfo.FindStringSubmatch(m)
-		scheme, cred := parts[1], parts[2]
-		name := cred
-		if i := strings.IndexByte(cred, ':'); i >= 0 {
-			name = cred[:i]
-		}
-		if name == "" {
-			return scheme + "***@"
-		}
-		return scheme + name + ":***@"
+		return parts[1] + "***@"
 	})
 	return Secrets(out)
 }
+
+// All is the boundary every string from an external tool passes through: the
+// credentials a location can carry, and any value the environment marks secret.
+func All(s string) string { return Location(s) }
 
 // Secrets replaces any value the environment marks as a secret wherever it
 // appears — a tool's own error message can quote what it was given.
@@ -49,9 +47,9 @@ func Secrets(s string) string {
 	}
 	for _, name := range secretVars {
 		v := os.Getenv(name)
-		// A short value is a word, not a distinctive secret: replacing it
-		// everywhere would mangle repository paths and ordinary messages.
-		if len(v) < 8 {
+		// Every passphrase is replaced, however short. A short one will also
+		// blank the odd innocent word, which is the right way round to be wrong.
+		if len(v) < 3 {
 			continue
 		}
 		s = strings.ReplaceAll(s, v, "***")

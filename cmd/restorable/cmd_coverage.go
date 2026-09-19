@@ -69,7 +69,9 @@ func cmdCoverage(ctx context.Context, a *app.App, args []string) (int, error) {
 	} else {
 		printCoverage(rep)
 	}
-	if *strict && rep.UnprotectedFiles > 0 {
+	// --strict is for a scheduled run: an answer nobody could give is not a
+	// clean bill of health either.
+	if *strict && (rep.UnprotectedFiles > 0 || rep.UnknownFiles > 0) {
 		return exitProblem, nil
 	}
 	return exitOK, nil
@@ -97,6 +99,9 @@ func printCoverage(rep coverage.Report) {
 	fmt.Printf("  walked %s in %s files across %s\n",
 		ui.Bytes(rep.TotalBytes), ui.Count(rep.TotalFiles), strings.Join(shorten(rep.Roots, width/2), ", "))
 	switch {
+	case rep.UnprotectedFiles == 0 && rep.UnknownFiles > 0:
+		fmt.Printf("  %s nothing was found unprotected, but %s in %s files could not be judged\n",
+			s.Yellow("?"), ui.Bytes(rep.UnknownBytes), ui.Count(rep.UnknownFiles))
 	case rep.UnprotectedFiles == 0 && rep.TotalFiles > 0:
 		fmt.Printf("  %s every file walked is claimed by a backup\n", s.Green("✓"))
 	case rep.TotalFiles == 0:
@@ -104,6 +109,10 @@ func printCoverage(rep coverage.Report) {
 	default:
 		fmt.Printf("  %s %s in %s files is protected by nothing (%.1f%% of what was walked)\n",
 			s.Red("✗"), ui.Bytes(rep.UnprotectedBytes), ui.Count(rep.UnprotectedFiles), share)
+		if rep.UnknownFiles > 0 {
+			fmt.Printf("  %s %s in %s files could not be judged\n",
+				s.Yellow("?"), ui.Bytes(rep.UnknownBytes), ui.Count(rep.UnknownFiles))
+		}
 	}
 
 	if len(unprotected) > 0 {
@@ -122,6 +131,18 @@ func printCoverage(rep coverage.Report) {
 			})
 		}
 		fmt.Print(indent(t.String(), "  "))
+	}
+
+	if unknown := rep.Unknowns(); len(unknown) > 0 {
+		fmt.Println()
+		fmt.Println(s.Bold("Could not tell"))
+		for i, f := range unknown {
+			if i >= 5 {
+				fmt.Printf("  %s\n", s.Dim(fmt.Sprintf("… and %d more", len(unknown)-5)))
+				break
+			}
+			fmt.Printf("  %s %s — %s\n", s.Yellow("?"), ui.Path(f.Path, max(24, width-60)), s.Dim(ui.Safe(f.Detail)))
+		}
 	}
 
 	var skipped, unreadable []coverage.Finding
@@ -151,6 +172,12 @@ func printCoverage(rep coverage.Report) {
 	if !rep.CheckedFiles {
 		fmt.Println()
 		fmt.Println(s.Dim("Directories were asked about, not single files. --files checks those too."))
+	}
+	for _, d := range rep.Destinations {
+		if d.Backend == backend.Restic && d.State == backend.StateOK && len(d.Roots) > 0 {
+			fmt.Println(s.Dim("Cover from a restic repository is a claim; `restorable drill` is the check."))
+			break
+		}
 	}
 }
 

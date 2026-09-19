@@ -34,12 +34,22 @@ func stubRestic(t *testing.T, script string) (recorded func() string) {
 	}
 }
 
-// The fixture names no machine this test runs on, which is the fallback case:
-// every snapshot's paths are used and the destination carries a note.
+// snapshotsJSON is written by this machine, so its paths are what the repository
+// covers here. thisHost fills the hostname in.
 const snapshotsJSON = `[
- {"time":"2026-09-18T10:00:00+02:00","paths":["/Users/x/Documents"],"hostname":"box","id":"aaaaaaaabbbbbbbb","short_id":"aaaaaaaa"},
- {"time":"2026-09-19T10:00:00+02:00","paths":["/Users/x/Documents","/Users/x/code"],"hostname":"box","id":"ccccccccdddddddd","short_id":"cccccccc"}
+ {"time":"2026-09-18T10:00:00+02:00","paths":["/Users/x/Documents"],"hostname":"HOST","id":"aaaaaaaabbbbbbbb","short_id":"aaaaaaaa"},
+ {"time":"2026-09-19T10:00:00+02:00","paths":["/Users/x/Documents","/Users/x/code"],"hostname":"HOST","id":"ccccccccdddddddd","short_id":"cccccccc"}
 ]`
+
+// thisHost puts this machine's name into a fixture.
+func thisHost(t *testing.T, fixture string) string {
+	t.Helper()
+	h, err := os.Hostname()
+	if err != nil {
+		t.Skip("no hostname")
+	}
+	return strings.ReplaceAll(fixture, "HOST", h)
+}
 
 func newBackend() *resticbk.Backend {
 	return &resticbk.Backend{
@@ -50,7 +60,7 @@ func newBackend() *resticbk.Backend {
 
 func TestDestinationsReadSnapshotsAndTheirRoots(t *testing.T) {
 	calls := stubRestic(t, `cat <<'JSON'
-`+snapshotsJSON+`
+`+thisHost(t, snapshotsJSON)+`
 JSON`)
 	dests, err := newBackend().Destinations(context.Background())
 	if err != nil {
@@ -86,15 +96,11 @@ JSON`)
 }
 
 func TestOnlyThisMachinesSnapshotsSayWhatIsCovered(t *testing.T) {
-	host, err := os.Hostname()
-	if err != nil {
-		t.Skip("no hostname")
-	}
 	stubRestic(t, `cat <<'JSON'
-[
+`+thisHost(t, `[
  {"time":"2026-09-18T10:00:00+02:00","paths":["/srv/other"],"hostname":"someone-elses-box","id":"aaaa","short_id":"aaaa"},
- {"time":"2026-09-19T10:00:00+02:00","paths":["/Users/x/Documents"],"hostname":"`+host+`","id":"bbbb","short_id":"bbbb"}
-]
+ {"time":"2026-09-19T10:00:00+02:00","paths":["/Users/x/Documents"],"hostname":"HOST","id":"bbbb","short_id":"bbbb"}
+]`)+`
 JSON`)
 	dests, err := newBackend().Destinations(context.Background())
 	if err != nil {
@@ -105,8 +111,8 @@ JSON`)
 		t.Errorf("roots = %v, want only this machine's paths", roots)
 	}
 
-	// A repository that names no machine we recognise still says something: its
-	// paths are used, with a note, rather than reporting that nothing is kept.
+	// A repository holding only another machine's snapshots covers nothing here,
+	// however recent it is, and the report says why.
 	stubRestic(t, `cat <<'JSON'
 [{"time":"2026-09-19T10:00:00+02:00","paths":["/srv/data"],"hostname":"a-container","id":"cccc","short_id":"cccc"}]
 JSON`)
@@ -114,11 +120,14 @@ JSON`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(dests[0].Roots) != 1 || dests[0].Roots[0] != "/srv/data" {
-		t.Errorf("roots = %v, want the fallback to every snapshot", dests[0].Roots)
+	if len(dests[0].Roots) != 0 {
+		t.Errorf("roots = %v, want none: those snapshots are another machine's", dests[0].Roots)
 	}
 	if dests[0].Note == "" {
-		t.Error("the fallback must be said out loud")
+		t.Error("claiming nothing must be explained")
+	}
+	if dests[0].LastOKSource != "restic snapshots of another machine" {
+		t.Errorf("source = %q, want it to say whose snapshots those are", dests[0].LastOKSource)
 	}
 }
 

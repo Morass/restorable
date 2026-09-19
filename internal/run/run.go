@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/morass/restorable/internal/redact"
 )
 
 // Tool is an external program restorable reads. Each one can be replaced for
@@ -271,7 +273,7 @@ func (r Runner) Stream(ctx context.Context, t Tool, args []string, fn func(line 
 }
 
 func firstLine(b []byte) string {
-	s := strings.TrimSpace(string(b))
+	s := redact.All(strings.TrimSpace(string(b)))
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
 		s = s[:i]
 	}

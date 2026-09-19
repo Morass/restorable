@@ -9,8 +9,9 @@ import (
 
 func TestCredentialsInARepositoryUrlAreRemoved(t *testing.T) {
 	cases := map[string]string{
-		"rest:https://alice:hunter2@backup.example.org/repo": "rest:https://alice:***@backup.example.org/repo",
-		"s3:https://KEYID:SECRETKEY@s3.example.org/bucket":   "s3:https://KEYID:***@s3.example.org/bucket",
+		// The whole userinfo goes: an S3 access key id is a credential too.
+		"rest:https://alice:hunter2@backup.example.org/repo": "rest:https://***@backup.example.org/repo",
+		"s3:https://KEYID:SECRETKEY@s3.example.org/bucket":   "s3:https://***@s3.example.org/bucket",
 		"sftp:user@host:/srv/repo":                           "sftp:user@host:/srv/repo", // no scheme:// , nothing to hide
 		"/Volumes/backup/restic":                             "/Volumes/backup/restic",
 	}
@@ -34,10 +35,10 @@ func TestASecretFromTheEnvironmentIsNeverEchoed(t *testing.T) {
 	if !strings.Contains(got, "***") {
 		t.Errorf("Secrets = %q, want the value replaced", got)
 	}
-	// A short value is a word, not a secret to chase through every message: a
-	// passphrase of "demo" must not turn /tmp/demo-repo into /tmp/***-repo.
+	// A short passphrase is still a passphrase: it is replaced even where that
+	// makes an ordinary word disappear, because the other way round leaks.
 	t.Setenv("RESTIC_PASSWORD", "demo")
-	if got := redact.Secrets("reading /tmp/demo-repo"); got != "reading /tmp/demo-repo" {
-		t.Errorf("Secrets mangled an ordinary path: %q", got)
+	if got := redact.Secrets("reading /tmp/demo-repo"); strings.Contains(got, "demo-repo") {
+		t.Errorf("a short passphrase survived: %q", got)
 	}
 }

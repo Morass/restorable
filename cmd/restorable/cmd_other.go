@@ -47,7 +47,10 @@ func cmdHistory(args []string) (int, error) {
 	}
 	for _, r := range rs {
 		result := s.Green("pass")
-		if !r.Pass {
+		switch {
+		case r.Inconclusive:
+			result = s.Yellow("none")
+		case !r.Pass:
 			result = s.Red("FAIL")
 		}
 		where := r.Label

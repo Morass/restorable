@@ -106,7 +106,7 @@ hashed against the live copies. A file you edited after the snapshot is reported
 as **changed**, not as a failure; a file whose bytes differ although nothing
 edited it, or that the backup will not hand back at all, is a **failure** and
 exits 1. If nothing could be compared — everything sampled was edited, deleted or
-unreadable — the drill says so and does not call that a pass.
+unreadable — the drill says so plainly and does not call that a pass.
 
 The sample comes from your home directory inside the snapshot; `--path` picks
 another part of it.
@@ -171,8 +171,9 @@ restorable drill --help      # the same
 ## What it touches
 
 - **It reads your backups. It never writes to them.** No repository is ever
-  modified, locked, pruned or repaired, and a drill only ever restores into a
-  temporary directory, which it removes unless you pass `--keep`.
+  modified, locked, pruned or repaired. A drill restores into a directory it
+  creates for itself and removes again unless you pass `--keep`, and it refuses a
+  `--target` inside the repository it is reading.
 - **Your files are read, never copied anywhere.** `coverage` reads names and
   sizes; a drill reads the sampled files to hash them. Nothing leaves the machine.
 - **It writes two things**: receipts under `~/.local/state/restorable/`
@@ -193,7 +194,11 @@ restorable drill --help      # the same
   file, or if it was told to exclude something restic does not record. That is what
   `drill` is for.
 - A restic repository says what it covers through the paths of **this machine's**
-  snapshots; a shared repository full of another host's files covers nothing here.
+  snapshots; a shared repository full of another host's files covers nothing here,
+  and `backends` says so.
+- What a restic repository *covers* is what it was pointed at, not what it kept:
+  restic records the files it took, not the rules it was given. That is why
+  coverage calls it a claim and `drill` is the check.
 - When a destination claims a path but cannot be asked whether it keeps it, the
   report says the answer is **unknown** rather than guessing either way.
 - By default it asks about **directories, not single files**; `--files` is slower

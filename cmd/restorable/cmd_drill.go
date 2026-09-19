@@ -21,7 +21,7 @@ func cmdDrill(ctx context.Context, a *app.App, args []string) (int, error) {
 		count   = fs.Int("count", drill.DefaultCount, "how many files to sample")
 		seed    = fs.Int64("seed", 0, "sample the same files again")
 		maxSize = fs.String("max-size", "32MB", "skip files larger than this")
-		target  = fs.String("target", "", "restore into this directory")
+		target  = fs.String("target", "", "put the drill's own directory here")
 		keep    = fs.Bool("keep", false, "keep the restored copies")
 		asJSON  = fs.Bool("json", false, "print JSON")
 		path    = fs.String("path", "", "sample from this directory of the snapshot (default: your home directory)")
@@ -103,7 +103,9 @@ func printDrill(rec drill.Receipt, receiptPath string, askedSeed bool) {
 
 	counts := rec.Counts()
 	fmt.Println()
-	if rec.Pass {
+	if rec.Inconclusive {
+		fmt.Printf("  %s nothing could be compared, so this drill proves nothing", s.Yellow("?"))
+	} else if rec.Pass {
 		fmt.Printf("  %s %d of %d files came back byte for byte",
 			s.Green("✓"), counts[drill.Match], len(rec.Files))
 	} else {

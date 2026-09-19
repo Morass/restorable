@@ -150,6 +150,21 @@ func SortSnapshots(s []Snapshot) {
 	sort.SliceStable(s, func(i, j int) bool { return s[i].Time.Before(s[j].Time) })
 }
 
+// SnapshotsOfHost keeps the snapshots a named machine wrote. An empty host, or
+// snapshots that name no host, keep everything: there is nothing to go on.
+func SnapshotsOfHost(snaps []Snapshot, host string) []Snapshot {
+	if host == "" {
+		return snaps
+	}
+	var out []Snapshot
+	for _, s := range snaps {
+		if s.Host == "" || strings.EqualFold(s.Host, host) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // Newest returns the newest snapshot, or false when there is none.
 func Newest(s []Snapshot) (Snapshot, bool) {
 	if len(s) == 0 {

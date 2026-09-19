@@ -201,8 +201,15 @@ func TestSymlinksAreNotFollowed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := findingFor(rep, filepath.Join(root, "link")); ok {
-		t.Error("a symlink was walked; it is not data and it can loop")
+	f, ok := findingFor(rep, filepath.Join(root, "link"))
+	if !ok {
+		t.Fatalf("a symlink must be named as skipped, not silently missed: %+v", rep.Findings)
+	}
+	if f.Kind != coverage.Skipped {
+		t.Errorf("kind = %q, want %q: a symlink is not walked", f.Kind, coverage.Skipped)
+	}
+	if f.Bytes != 0 || f.Files != 0 {
+		t.Errorf("a skipped symlink must not be counted: %+v", f)
 	}
 	if rep.TotalFiles != 1 {
 		t.Errorf("total files = %d, want 1 (the symlink must not be counted twice)", rep.TotalFiles)

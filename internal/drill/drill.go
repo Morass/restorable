@@ -179,6 +179,9 @@ func Run(ctx context.Context, b backend.Backend, d backend.Destination, snap bac
 	if parent == "" {
 		parent = os.TempDir()
 	} else {
+		if err := insideBackup(parent, d); err != nil {
+			return rec, err
+		}
 		if err := os.MkdirAll(parent, 0o700); err != nil {
 			return rec, err
 		}
@@ -338,6 +341,26 @@ func reservoir(ctx context.Context, w backend.Walker, d backend.Destination, sna
 	}
 	sort.SliceStable(sample, func(i, j int) bool { return sample[i].Path < sample[j].Path })
 	return sample, seen, nil
+}
+
+// insideBackup refuses a target inside the destination being drilled: restoring
+// into a backup is the one place a read-only tool must never write.
+func insideBackup(target string, d backend.Destination) error {
+	places := append([]string{d.ID, d.Mount}, d.Roots...)
+	clean := filepath.Clean(target)
+	for _, p := range places {
+		if p == "" || !filepath.IsAbs(p) {
+			continue
+		}
+		p = filepath.Clean(p)
+		if clean == p || strings.HasPrefix(clean, p+string(filepath.Separator)) {
+			if p == "/" {
+				continue // a Time Machine destination covers "/", which is not a repository
+			}
+			return fmt.Errorf("%s is inside %s, which this drill is reading: pick somewhere else", target, p)
+		}
+	}
+	return nil
 }
 
 // alternatives are the other spellings of a scope worth trying. A backup records

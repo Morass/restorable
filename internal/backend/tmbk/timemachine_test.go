@@ -362,3 +362,78 @@ func TestAPathFromABackupCannotEscapeTheTarget(t *testing.T) {
 		t.Errorf("a restore wrote outside its target: %v", escaped)
 	}
 }
+
+func TestTheVolumeDirectoryIsNotPartOfTheLivePath(t *testing.T) {
+	// A Time Machine backup wraps each volume in a directory of its own:
+	// <backup>/<Macintosh HD>/Users/x/a.txt is /Users/x/a.txt on the disk.
+	backupRoot := t.TempDir()
+	inside := filepath.Join(backupRoot, "Macintosh HD", "Users", "x")
+	if err := os.MkdirAll(inside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(inside, "a.txt"), []byte("backed up"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	b := &tmbk.Backend{}
+	var seen []string
+	if err := b.Walk(context.Background(), backend.Destination{}, backupRoot, "", func(f backend.File) error {
+		seen = append(seen, f.Path)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 1 || seen[0] != "/Users/x/a.txt" {
+		t.Fatalf("walked %v, want the live path without the volume directory", seen)
+	}
+
+	// And a restore of that live path finds it again inside the volume.
+	target := t.TempDir()
+	if err := b.Restore(context.Background(), backend.Destination{}, backupRoot, seen, target); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(target, "Users", "x", "a.txt"))
+	if err != nil {
+		t.Fatalf("the file was not restored: %v", err)
+	}
+	if string(got) != "backed up" {
+		t.Errorf("restored %q", got)
+	}
+}
+
+func TestANameWithANewlineIsNotAskedAbout(t *testing.T) {
+	stubTmutil(t, `echo "[Included]  x"`)
+	b := &tmbk.Backend{}
+	_, err := b.Excluded(context.Background(), backend.Destination{}, []string{"/Users/x/a\nb"})
+	if err == nil {
+		t.Fatal("a path holding a newline cannot be told apart in tmutil's answer")
+	}
+	if !strings.Contains(err.Error(), "newline") {
+		t.Errorf("error = %v, want it to name the reason", err)
+	}
+}
+
+func TestAnAnswerAboutTheWrongPathIsRefused(t *testing.T) {
+	// A forged extra line, or an answer that does not name the path asked about,
+	// must not be matched to a path by position.
+	stubTmutil(t, `case "$1" in
+isexcluded) echo "[Included]  /somewhere/else"; echo "[Excluded]  /another/place";;
+*) exit 1;;
+esac`)
+	b := &tmbk.Backend{}
+	_, err := b.Excluded(context.Background(), backend.Destination{}, []string{"/Users/x", "/Users/y"})
+	if err == nil {
+		t.Fatal("answers naming other paths must be refused")
+	}
+}
+
+func TestAFailedExclusionQuestionIsAnError(t *testing.T) {
+	stubTmutil(t, `case "$1" in
+isexcluded) echo "tmutil: broken" >&2; exit 1;;
+*) exit 1;;
+esac`)
+	b := &tmbk.Backend{}
+	if _, err := b.Excluded(context.Background(), backend.Destination{}, []string{"/Users/x"}); err == nil {
+		t.Fatal("a non-zero exit must not read as 'not excluded'")
+	}
+}

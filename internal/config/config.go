@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/morass/restorable/internal/redact"
 )
 
 // ResticRepo is one restic repository the user wants watched.
@@ -162,13 +164,16 @@ func ExpandPath(p string) (string, error) {
 // validateRepo refuses a repository string that would be read as an option by
 // the tool we hand it to, and one that cannot be a repository at all.
 func validateRepo(kind, name, repo string) error {
+	// The name can be the location itself, which may carry credentials, so every
+	// message here goes through the same redaction as the rest of the output.
+	safeName := redact.Location(name)
 	switch {
 	case strings.TrimSpace(repo) == "":
-		return fmt.Errorf("%s repository %q has no repo", kind, name)
+		return fmt.Errorf("%s repository %q has no repo", kind, safeName)
 	case strings.HasPrefix(repo, "-"):
-		return fmt.Errorf("%s repository %q starts with '-', which %s would read as an option", kind, name, kind)
+		return fmt.Errorf("%s repository %q starts with '-', which %s would read as an option", kind, safeName, kind)
 	case strings.ContainsAny(repo, "\x00\n"):
-		return fmt.Errorf("%s repository %q contains a newline or a NUL", kind, name)
+		return fmt.Errorf("%s repository %q contains a newline or a NUL", kind, safeName)
 	}
 	return nil
 }

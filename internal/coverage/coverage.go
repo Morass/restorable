@@ -79,6 +79,8 @@ type Report struct {
 	TotalFiles       int   `json:"total_files"`
 	UnprotectedBytes int64 `json:"unprotected_bytes"`
 	UnprotectedFiles int   `json:"unprotected_files"`
+	UnknownBytes     int64 `json:"unknown_bytes"`
+	UnknownFiles     int   `json:"unknown_files"`
 
 	Dirs     int           `json:"dirs_visited"`
 	Duration time.Duration `json:"duration"`
@@ -469,7 +471,11 @@ func (w *walker) read(ctx context.Context, dir pending) ([]pending, error) {
 		}
 		switch {
 		case info.Mode()&os.ModeSymlink != 0:
-			continue // a symlink is not data, and following one walks in circles
+			// A symlink is not data, and following one walks in circles — but
+			// staying quiet about it would hide what was not looked at.
+			w.addFinding(Finding{Path: full, Kind: Skipped,
+				Detail: "a symlink: what it points at is walked where it really lives, not here"}, false)
+			continue
 		case e.IsDir():
 			switch {
 			case !w.sameFilesystem(info):
@@ -514,10 +520,14 @@ func (w *walker) read(ctx context.Context, dir pending) ([]pending, error) {
 				continue
 			}
 			kind := NoBackup
-			if state == protectedExcluded {
+			counted := true
+			switch state {
+			case protectedExcluded:
 				kind = Excluded
+			case protectedUnknown:
+				kind, counted = Unknown, false
 			}
-			w.addFinding(Finding{Path: f, Kind: kind, Detail: detail, Bytes: info.Size(), Files: 1}, true)
+			w.addFinding(Finding{Path: f, Kind: kind, Detail: detail, Bytes: info.Size(), Files: 1}, counted)
 		}
 	}
 	return subdirs, nil
@@ -527,9 +537,13 @@ func (w *walker) read(ctx context.Context, dir pending) ([]pending, error) {
 // unprotected totals (a skipped or unreadable place is not a hole, it is a gap in
 // what we know).
 func (w *walker) addFinding(f Finding, counted bool) {
-	if counted && (f.Kind == NoBackup || f.Kind == Excluded) {
+	switch {
+	case counted && (f.Kind == NoBackup || f.Kind == Excluded):
 		w.rep.UnprotectedBytes += f.Bytes
 		w.rep.UnprotectedFiles += f.Files
+	case f.Kind == Unknown:
+		w.rep.UnknownBytes += f.Bytes
+		w.rep.UnknownFiles += f.Files
 	}
 	if f.Kind == NoBackup || f.Kind == Excluded {
 		if f.Bytes < w.opts.MinBytes {
@@ -539,10 +553,15 @@ func (w *walker) addFinding(f Finding, counted bool) {
 	w.rep.Findings = append(w.rep.Findings, f)
 }
 
+// rollupMaxDepth bounds a rollup: a bind mount can make a directory contain
+// itself, and counting must not follow that for ever.
+const rollupMaxDepth = 64
+
 // rollup counts the regular files below a path without asking any questions.
 func (w *walker) rollup(root string) (int64, int) {
 	var bytes int64
 	var files int
+	rootDepth := strings.Count(filepath.Clean(root), string(filepath.Separator))
 	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if w.ctx != nil && w.ctx.Err() != nil {
 			return w.ctx.Err()
@@ -565,6 +584,11 @@ func (w *walker) rollup(root string) (int64, int) {
 			return nil
 		case d.IsDir():
 			if p != root && !w.sameFilesystem(info) {
+				return fs.SkipDir
+			}
+			if strings.Count(filepath.Clean(p), string(filepath.Separator))-rootDepth > rollupMaxDepth {
+				w.addFinding(Finding{Path: p, Kind: Skipped,
+					Detail: "deeper than this tool will count; a loop in the filesystem would never end"}, false)
 				return fs.SkipDir
 			}
 			// The same folders are left alone here as in the walk proper:
@@ -657,5 +681,6 @@ func (r Report) Unprotected() []Finding {
 	return out
 }
 
-// Verdict is the one-line answer: true when nothing is unprotected.
-func (r Report) Verdict() bool { return r.UnprotectedFiles == 0 }
+// Verdict is the one-line answer: true when nothing is unprotected and nothing
+// was left unanswered. A walk that could not tell has not said yes.
+func (r Report) Verdict() bool { return r.UnprotectedFiles == 0 && r.UnknownFiles == 0 }

@@ -98,7 +98,7 @@ Flags
   --count N        how many files to sample (default 12)
   --seed N         sample the same files again
   --max-size SIZE  skip files larger than this (default 32MB)
-  --target DIR     restore into this directory instead of a temporary one
+  --target DIR     put the drill's own directory here instead of in the temporary one
   --keep           keep the restored copies
   --json           print JSON instead of a table`,
 	},

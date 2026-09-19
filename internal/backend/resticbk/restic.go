@@ -71,21 +71,22 @@ func (b *Backend) Destinations(ctx context.Context) ([]backend.Destination, erro
 			d.State = backend.StateOK
 			d.Connected = true // the repository answered just now
 			d.Snapshots = len(snaps)
-			if n, ok := backend.Newest(snaps); ok {
+			mine := backend.SnapshotsOfHost(snaps, hostname())
+			if n, ok := backend.Newest(mine); ok {
 				d.LastOK = n.Time
 				d.LastOKSource = "restic snapshots"
+			} else if n, ok := backend.Newest(snaps); ok {
+				// Nothing in the repository names this machine: the date is
+				// somebody else's, and the report has to say so.
+				d.LastOK = n.Time
+				d.LastOKSource = "restic snapshots of another machine"
 			}
-			// Only this machine's snapshots say what is covered here: a shared
-			// repository full of another host's files covers nothing local. If
-			// none of the snapshots name this host — a renamed machine, a
-			// repository written from a container — fall back to all of them
-			// rather than reporting that nothing is covered.
+			// Only this machine's snapshots say what is covered here. A shared
+			// repository full of another host's files covers nothing local, and
+			// adopting those paths would report cover that does not exist.
 			d.Roots = rootsOf(snaps, hostname())
-			if len(d.Roots) == 0 {
-				d.Roots = rootsOf(snaps, "")
-				if len(d.Roots) > 0 {
-					d.Note = "no snapshot in this repository names this machine, so its paths are taken from every snapshot"
-				}
+			if len(d.Roots) == 0 && len(snaps) > 0 {
+				d.Note = "no snapshot in this repository was written by this machine, so it is not treated as covering anything here"
 			}
 		}
 		out = append(out, d)
@@ -161,11 +162,16 @@ func (b *Backend) List(ctx context.Context, d backend.Destination, snapshot, pat
 	if err := safe.SnapshotID(snapshot); err != nil {
 		return nil, err
 	}
-	args := []string{"--json", "--no-lock", "ls", snapshot}
+	args := []string{"--json", "--no-lock", "ls"}
 	if path != "" {
 		if err := safe.Argument("path", path); err != nil {
 			return nil, err
 		}
+		// Without --recursive, restic lists one level below the path and stops.
+		args = append(args, "--recursive")
+	}
+	args = append(args, snapshot)
+	if path != "" {
 		args = append(args, path)
 	}
 	res, err := b.runner(r).Run(ctx, run.Restic, args...)
@@ -210,8 +216,9 @@ func (b *Backend) Restore(ctx context.Context, d backend.Destination, snapshot s
 		if err := safe.Argument("path", f); err != nil {
 			return err
 		}
-		// --include=VALUE, so a path can never be read as a flag of its own.
-		args = append(args, "--include="+f)
+		// --include takes a pattern, so a file whose name holds *, ? or [ would
+		// select other files (or none). The path is escaped to mean itself.
+		args = append(args, "--include="+escapePattern(f))
 	}
 	rr := b.runner(r)
 	if rr.Timeout == 0 {
@@ -234,6 +241,19 @@ func hostname() string {
 		return ""
 	}
 	return h
+}
+
+// escapePattern turns a literal path into a pattern that matches only that path.
+func escapePattern(p string) string {
+	var b strings.Builder
+	for _, r := range p {
+		switch r {
+		case '*', '?', '[', ']', '\\':
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 func rootsOf(snaps []backend.Snapshot, host string) []string {
@@ -293,11 +313,17 @@ func (b *Backend) Walk(ctx context.Context, d backend.Destination, snapshot, pat
 	if err := safe.SnapshotID(snapshot); err != nil {
 		return err
 	}
-	args := []string{"--json", "--no-lock", "ls", snapshot}
+	args := []string{"--json", "--no-lock", "ls"}
 	if path != "" {
 		if err := safe.Argument("path", path); err != nil {
 			return err
 		}
+		// Without --recursive, restic lists one level below the path and stops,
+		// so a drill scoped to a directory would only ever sample its top.
+		args = append(args, "--recursive")
+	}
+	args = append(args, snapshot)
+	if path != "" {
 		args = append(args, path)
 	}
 	return b.runner(r).Stream(ctx, run.Restic, args, func(line []byte) error {

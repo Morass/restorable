@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -317,8 +318,11 @@ func (n noWalker) Restore(ctx context.Context, d backend.Destination, s string, 
 }
 
 func TestAScopeThatTheSnapshotSpellsDifferentlyStillWorks(t *testing.T) {
-	// The snapshot holds /private/tmp/..., the caller asks about /tmp/...:
-	// the same directory on a Mac, spelled the way it was typed.
+	// The snapshot holds /private/tmp/..., the caller asks about /tmp/...: the
+	// same directory on a Mac, spelled the way it was typed when the backup ran.
+	if runtime.GOOS != "darwin" {
+		t.Skip("the /private spelling is a macOS thing")
+	}
 	root := t.TempDir()
 	content := map[string][]byte{
 		"/private" + root + "/a.txt": []byte("aaa"),

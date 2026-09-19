@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,7 +32,7 @@ func TestDoctorIsQuietWhenFreshAndLoudWhenStale(t *testing.T) {
 	contains(t, fresh.Stdout, "readable and fresher")
 	contains(t, fresh.Stdout, "run `restorable drill`")
 
-	stale := w.mustRun(1, "doctor", "--stale-after", "1s")
+	stale := w.mustRun(1, "doctor", "--stale-after", "1ms")
 	contains(t, stale.Stdout, "What is wrong")
 	contains(t, stale.Stdout, "the last backup is")
 }
@@ -458,4 +459,83 @@ func TestASecondConfigWriteDoesNotFollowASymlink(t *testing.T) {
 	if _, err := os.Stat(victim); err == nil {
 		t.Error("config --write created the file the symlink pointed at")
 	}
+}
+
+func TestAQuestionThatCannotBeAnsweredIsShownAsUnknown(t *testing.T) {
+	w := newWorld(t)
+	w.writeFile("data/work/a.txt", "hello")
+	// A Time Machine whose exclusion question fails: neither cover nor a hole.
+	w.stubTool("RESTORABLE_TMUTIL", "tmutil", `case "$1" in
+destinationinfo) cat <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict><key>Destinations</key><array><dict>
+<key>Name</key><string>Backup Disk</string><key>Kind</key><string>Local</string>
+<key>ID</key><string>1111</string><key>MountPoint</key><string>/Volumes/Backup Disk</string></dict></array></dict></plist>
+PLIST
+;;
+listbackups) echo "/Volumes/Backup Disk/Backups.backupdb/box/2099-01-01-120000";;
+isexcluded) echo "tmutil: something went wrong" >&2; exit 1;;
+*) exit 1;;
+esac`)
+	delete(w.Env, "RESTIC_REPOSITORY")
+
+	res := w.mustRun(0, "coverage", filepath.Join(w.Home, "data"))
+	contains(t, res.Stdout, "Could not tell")
+	contains(t, res.Stdout, "could not ask")
+	absent(t, res.Stdout, "protected by nothing")
+}
+
+func TestADrillSamplesFilesDeepInTheTreeNotJustTheTop(t *testing.T) {
+	w := newWorld(t)
+	w.noTimeMachine()
+	// One file at the top and many below it: a listing that does not recurse
+	// would only ever sample the top one.
+	w.writeFile("data/work/top.txt", "top")
+	for i := 0; i < 20; i++ {
+		w.writeFile(fmt.Sprintf("data/work/deep/sub%02d/file.txt", i), fmt.Sprintf("deep %d", i))
+	}
+	w.restic(filepath.Join(w.Home, "data", "work"))
+
+	res := w.mustRun(0, "drill", "--count", "12", "--seed", "11", "--path", filepath.Join(w.Home, "data", "work"))
+	if strings.Count(res.Stdout, "deep/sub") < 5 {
+		t.Errorf("the sample did not reach the files below the top:\n%s", res.Stdout)
+	}
+	contains(t, res.Stdout, "came back byte for byte")
+}
+
+func TestADrillRefusesToWriteInsideTheRepositoryItIsReading(t *testing.T) {
+	w := newWorld(t)
+	w.noTimeMachine()
+	w.writeFile("data/work/a.txt", "hello")
+	repo := w.restic(filepath.Join(w.Home, "data", "work"))
+
+	res := w.run("drill", "--count", "2", "--target", filepath.Join(repo, "restored"))
+	if res.Code == 0 {
+		t.Errorf("a drill wrote into the repository it was reading:\n%s", res.Stdout)
+	}
+	contains(t, res.Stderr, "pick somewhere else")
+}
+
+func TestStrictCoverageFailsWhenSomethingCouldNotBeJudged(t *testing.T) {
+	w := newWorld(t)
+	w.writeFile("data/work/a.txt", "hello")
+	w.stubTool("RESTORABLE_TMUTIL", "tmutil", `case "$1" in
+destinationinfo) cat <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict><key>Destinations</key><array><dict>
+<key>Name</key><string>Backup Disk</string><key>Kind</key><string>Local</string>
+<key>ID</key><string>1111</string><key>MountPoint</key><string>/Volumes/Backup Disk</string></dict></array></dict></plist>
+PLIST
+;;
+listbackups) echo "/Volumes/Backup Disk/Backups.backupdb/box/2099-01-01-120000";;
+isexcluded) echo "tmutil: broken" >&2; exit 1;;
+*) exit 1;;
+esac`)
+	delete(w.Env, "RESTIC_REPOSITORY")
+
+	res := w.run("coverage", "--strict", filepath.Join(w.Home, "data"))
+	if res.Code != 1 {
+		t.Errorf("--strict exited %d; an answer nobody could give is not a clean bill of health:\n%s", res.Code, res.Stdout)
+	}
+	contains(t, res.Stdout, "could not be judged")
 }
