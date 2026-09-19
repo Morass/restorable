@@ -157,6 +157,10 @@ func printCoverage(rep coverage.Report) {
 func reasonText(s ui.Style, f coverage.Finding) string {
 	switch f.Kind {
 	case coverage.NoBackup:
+		// The usual reason is the tag itself; only an unusual one is worth words.
+		if f.Detail == "" || f.Detail == "no backup destination covers this path" {
+			return s.Red("no backup keeps it")
+		}
 		return s.Red("no backup") + " — " + f.Detail
 	case coverage.Excluded:
 		return s.Yellow("excluded") + " — " + f.Detail

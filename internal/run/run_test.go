@@ -168,3 +168,29 @@ var errAfterTen = errStop("enough")
 type errStop string
 
 func (e errStop) Error() string { return string(e) }
+
+func TestAToolIsFoundOnTheRunnersPathNotOnlyTheSessionPath(t *testing.T) {
+	// A shell whose PATH knows nothing about Homebrew must still find a tool
+	// installed there, because that is where these tools live on a Mac.
+	dir := t.TempDir()
+	t.Setenv("PATH", dir)
+	t.Setenv("RESTORABLE_PATH", dir+":"+t.TempDir())
+	if run.Restic.Available() {
+		t.Fatal("the fixture path holds no restic yet")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "restic"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !run.Restic.Available() {
+		t.Error("a tool on the runner's own path must be found")
+	}
+	// A file that is not executable is not a tool.
+	notATool := t.TempDir()
+	t.Setenv("RESTORABLE_PATH", notATool)
+	if err := os.WriteFile(filepath.Join(notATool, "restic"), []byte("text"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if run.Restic.Available() {
+		t.Error("a file without the executable bit must not count as the tool")
+	}
+}

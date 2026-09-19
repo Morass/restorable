@@ -354,3 +354,36 @@ func TestMachineAccessCanBeSwitchedOffCompletely(t *testing.T) {
 // timeLongAgo is older than any snapshot a test makes, so a difference in bytes
 // cannot be explained away as an edit.
 func timeLongAgo() time.Time { return time.Date(2001, 1, 1, 0, 0, 0, 0, time.UTC) }
+
+func TestAMachineWithNoBackupAtAllIsToldWhatToDo(t *testing.T) {
+	w := newWorld(t)
+	w.noTimeMachine()
+	delete(w.Env, "RESTIC_REPOSITORY")
+
+	res := w.mustRun(1, "doctor")
+	contains(t, res.Stdout, "nothing on this machine is backing anything up")
+	contains(t, res.Stdout, "restorable config --write")
+	absent(t, res.Stdout, "✗ :") // no empty name before the colon
+
+	backends := w.mustRun(0, "backends")
+	absent(t, backends.Stdout, "borg") // borg is not read yet; do not promise it
+}
+
+func TestAHangingToolDoesNotHangTheTool(t *testing.T) {
+	w := newWorld(t)
+	// A tmutil that never answers: the deadline must end it, not the user.
+	w.stubTool("RESTORABLE_TMUTIL", "tmutil", "sleep 600")
+	delete(w.Env, "RESTIC_REPOSITORY")
+	w.Env["RESTORABLE_TIMEOUT"] = "1s"
+
+	done := make(chan result, 1)
+	go func() { done <- w.run("backends") }()
+	select {
+	case res := <-done:
+		if res.Code == 0 && strings.Contains(res.Stdout, "readable") {
+			t.Errorf("a tool that never answers must not read as a healthy backup:\n%s", res.Stdout)
+		}
+	case <-time.After(70 * time.Second):
+		t.Fatal("the tool waited for a hanging tmutil instead of giving up")
+	}
+}

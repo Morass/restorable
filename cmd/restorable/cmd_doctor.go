@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"runtime"
 	"time"
 
 	"github.com/morass/restorable/internal/app"
@@ -44,6 +45,14 @@ func cmdDoctor(ctx context.Context, a *app.App, args []string) (int, error) {
 func printDoctor(rep app.Doctor) {
 	s := ui.NewStyle(os.Stdout)
 	width := ui.TerminalWidth(os.Stdout)
+
+	// A machine with nothing set up needs one sentence, not an empty table.
+	if nothingAtAll(rep) {
+		fmt.Printf("%s %s\n", s.Red("✗"), app.NoBackupSystem)
+		fmt.Printf("  %s\n", s.Dim(noBackupHint()))
+		return
+	}
+
 	fmt.Println(s.Bold("Destinations"))
 
 	t := ui.Table{
@@ -57,7 +66,7 @@ func printDoctor(rep app.Doctor) {
 			where = d.ID
 		}
 		if where == "" {
-			where = "—"
+			where = "nothing configured"
 		}
 		state := s.Green("ok")
 		switch {
@@ -100,6 +109,11 @@ func printDoctor(rep app.Doctor) {
 		if h.Problem == "" {
 			continue
 		}
+		if h.Problem == app.NoBackupSystem {
+			fmt.Printf("  %s %s\n", s.Red("✗"), h.Problem)
+			fmt.Printf("    %s\n", s.Dim(noBackupHint()))
+			continue
+		}
 		where := h.Dest.Label
 		if where == "" {
 			where = h.Dest.ID
@@ -112,6 +126,30 @@ func printDoctor(rep app.Doctor) {
 			fmt.Printf("    %s\n", s.Dim(hint))
 		}
 	}
+	if rep.NothingReadable {
+		fmt.Println()
+		fmt.Printf("  %s %s\n", s.Red("✗"), "nothing on this machine is backing anything up")
+		fmt.Printf("    %s\n", s.Dim(noBackupHint()))
+	}
+}
+
+// nothingAtAll reports the case where not one backup system was even found.
+func nothingAtAll(rep app.Doctor) bool {
+	for _, h := range rep.Health {
+		if h.Problem == app.NoBackupSystem {
+			return true
+		}
+	}
+	return false
+}
+
+// noBackupHint says what restorable can read, so a machine with nothing set up
+// learns what to do instead of only that something is missing.
+func noBackupHint() string {
+	if runtime.GOOS == "darwin" {
+		return "restorable reads Time Machine and restic. Set one up, then point restorable at it: `restorable config --write`."
+	}
+	return "restorable reads restic. Set RESTIC_REPOSITORY, or add the repository with `restorable config --write`."
 }
 
 func doctorHint(h app.Health) string {

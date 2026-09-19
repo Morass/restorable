@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="879" height="322" viewBox="0 0 879 322" font-family="'SF Mono', Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace" font-size="14">
+<rect width="879" height="322" rx="10" fill="#10141b"/>
+<rect width="879" height="34" rx="10" fill="#1a1f29"/><rect y="24" width="879" height="10" fill="#1a1f29"/>
+<circle cx="20" cy="17" r="6" fill="#ff5f57"/><circle cx="40" cy="17" r="6" fill="#febc2e"/><circle cx="60" cy="17" r="6" fill="#28c840"/><text x="440" y="22" fill="#8b93a3" text-anchor="middle" font-size="13">restorable drill</text>
+<text x="18.00" y="56.32" fill="#d5dae3" font-weight="700" xml:space="preserve">Drilling</text><text x="85.44" y="56.32" fill="#d5dae3" xml:space="preserve"> /tmp/backup/repo </text><text x="237.18" y="56.32" fill="#7f8796" xml:space="preserve">snapshot</text><text x="304.62" y="56.32" fill="#d5dae3" xml:space="preserve"> f9e2526a (just now)</text>
+<text x="34.86" y="74.32" fill="#7f8796" xml:space="preserve">restoring 5 files from f9e2526a</text>
+
+<text x="34.86" y="110.32" fill="#7f8796" xml:space="preserve">RESULT</text><text x="119.16" y="110.32" fill="#7f8796" xml:space="preserve">SIZE</text><text x="169.74" y="110.32" fill="#7f8796" xml:space="preserve">FILE</text>
+<text x="34.86" y="128.32" fill="#a6e3a1" xml:space="preserve">match</text><text x="77.01" y="128.32" fill="#d5dae3" xml:space="preserve">   879 KB  ~/Documents/contracts/lease.pdf</text>
+<text x="34.86" y="146.32" fill="#a6e3a1" xml:space="preserve">match</text><text x="77.01" y="146.32" fill="#d5dae3" xml:space="preserve">    18 KB  ~/Documents/notes.md</text>
+<text x="34.86" y="164.32" fill="#a6e3a1" xml:space="preserve">match</text><text x="77.01" y="164.32" fill="#d5dae3" xml:space="preserve">   2.1 MB  ~/Documents/taxes-2026.pdf</text>
+<text x="34.86" y="182.32" fill="#a6e3a1" xml:space="preserve">match</text><text x="77.01" y="182.32" fill="#d5dae3" xml:space="preserve">    400 B  ~/code/webshop/go.mod</text>
+<text x="34.86" y="200.32" fill="#a6e3a1" xml:space="preserve">match</text><text x="77.01" y="200.32" fill="#d5dae3" xml:space="preserve">    23 KB  ~/code/webshop/main.go</text>
+
+<text x="34.86" y="236.32" fill="#a6e3a1" textLength="8.43" lengthAdjust="spacingAndGlyphs" xml:space="preserve">✓</text><text x="43.29" y="236.32" fill="#d5dae3" xml:space="preserve"> 5 of 5 files came back byte for byte</text>
+<text x="34.86" y="254.32" fill="#7f8796" xml:space="preserve">5 files sampled in 2s</text>
+<text x="34.86" y="272.32" fill="#7f8796" xml:space="preserve">receipt: ~/.state/receipts/20260919-173027-restic.json</text>
+<text x="18.00" y="290.32" fill="#a6e3a1" font-weight="700" xml:space="preserve">$</text>
+</svg>

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -70,11 +71,13 @@ func (t Tool) Path() (string, error) {
 	if NoMachine() {
 		return "", fmt.Errorf("%s: %w", t.Name, ErrNoMachine)
 	}
-	p, err := exec.LookPath(t.Name)
-	if err != nil {
-		return "", fmt.Errorf("%s: %w", t.Name, ErrMissing)
+	// The tool is looked for on the same path it will run with, not on the
+	// session's PATH: a backup tool installed in /opt/homebrew/bin must be found
+	// even from a shell whose PATH does not mention it.
+	if p, ok := lookPath(t.Name); ok {
+		return p, nil
 	}
-	return p, nil
+	return "", fmt.Errorf("%s: %w", t.Name, ErrMissing)
 }
 
 // Available reports whether the tool can be run at all.
@@ -89,6 +92,20 @@ type Runner struct {
 }
 
 const defaultTimeout = 30 * time.Second
+
+// TimeoutFromEnv reads RESTORABLE_TIMEOUT, so a slow network destination can be
+// given longer and a test can ask for a short one. An unreadable value is ignored.
+func TimeoutFromEnv() time.Duration {
+	v := os.Getenv("RESTORABLE_TIMEOUT")
+	if v == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return 0
+	}
+	return d
+}
 
 // Run executes the tool and returns its output. A non-zero exit is not an
 // error: the caller decides, because several of these tools use exit codes as
@@ -106,6 +123,7 @@ func (r Runner) Run(ctx context.Context, t Tool, args ...string) (Result, error)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, prog, args...)
+	groupKill(cmd)
 	cmd.Env = t.environ(r.Env)
 	cmd.Stdin = nil
 	var out, errb bytes.Buffer
@@ -151,6 +169,37 @@ func (t Tool) environ(extra []string) []string {
 	return append(env, extra...)
 }
 
+// lookPath finds an executable on the path restorable runs tools with.
+func lookPath(name string) (string, bool) {
+	if strings.ContainsRune(name, os.PathSeparator) {
+		if err := executable(name); err == nil {
+			return name, true
+		}
+		return "", false
+	}
+	for _, dir := range filepath.SplitList(pathEnv()) {
+		if dir == "" {
+			continue
+		}
+		candidate := filepath.Join(dir, name)
+		if err := executable(candidate); err == nil {
+			return candidate, true
+		}
+	}
+	return "", false
+}
+
+func executable(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() || info.Mode().Perm()&0o111 == 0 {
+		return os.ErrPermission
+	}
+	return nil
+}
+
 func pathEnv() string {
 	if p := os.Getenv("RESTORABLE_PATH"); p != "" {
 		return p
@@ -179,6 +228,7 @@ func (r Runner) Stream(ctx context.Context, t Tool, args []string, fn func(line 
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, prog, args...)
+	groupKill(cmd)
 	cmd.Env = t.environ(r.Env)
 	var errb bytes.Buffer
 	cmd.Stderr = &errb

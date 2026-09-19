@@ -104,7 +104,7 @@ func (c *Config) fromEnvironment() {
 		}
 	}
 	c.Restic = append(c.Restic, ResticRepo{
-		Name:            "RESTIC_REPOSITORY",
+		Name:            repo, // the repository itself is the clearest name for it
 		Repo:            repo,
 		PasswordCommand: os.Getenv("RESTIC_PASSWORD_COMMAND"),
 	})

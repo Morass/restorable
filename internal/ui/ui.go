@@ -21,8 +21,10 @@ func Colour(f *os.File) bool {
 	if os.Getenv("RESTORABLE_FORCE_COLOR") == "1" {
 		return true
 	}
-	_, err := unix.IoctlGetTermios(int(f.Fd()), unix.TIOCGETA)
-	return err == nil
+	// A character device is a terminal; the termios ioctl for this is spelled
+	// differently on macOS and Linux, and this needs no ioctl at all.
+	info, err := f.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
 }
 
 // Style is a set of escape codes, empty when colour is off.

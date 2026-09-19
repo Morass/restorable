@@ -51,6 +51,7 @@ func cmdDrill(ctx context.Context, a *app.App, args []string) (int, error) {
 	if !*asJSON {
 		opts.Progress = func(msg string) { fmt.Printf("  %s\n", s.Dim(msg)) }
 	}
+	askedSeed := *seed != 0
 	rec, receiptPath, err := a.Drill(ctx, pair, snap, opts)
 	if err != nil {
 		return exitError, err
@@ -62,7 +63,7 @@ func cmdDrill(ctx context.Context, a *app.App, args []string) (int, error) {
 			return exitError, err
 		}
 	} else {
-		printDrill(rec, receiptPath)
+		printDrill(rec, receiptPath, askedSeed)
 	}
 	if !rec.Pass {
 		return exitProblem, nil
@@ -70,7 +71,7 @@ func cmdDrill(ctx context.Context, a *app.App, args []string) (int, error) {
 	return exitOK, nil
 }
 
-func printDrill(rec drill.Receipt, receiptPath string) {
+func printDrill(rec drill.Receipt, receiptPath string, askedSeed bool) {
 	s := ui.NewStyle(os.Stdout)
 	width := ui.TerminalWidth(os.Stdout)
 	fmt.Println()
@@ -107,7 +108,11 @@ func printDrill(rec drill.Receipt, receiptPath string) {
 	if rec.Note != "" {
 		fmt.Printf("  %s\n", s.Dim(rec.Note))
 	}
-	fmt.Printf("  %s\n", s.Dim(fmt.Sprintf("%d files sampled with seed %d in %s", len(rec.Files), rec.Seed, app.Round(rec.Duration))))
+	sampled := fmt.Sprintf("%d files sampled in %s", len(rec.Files), app.Round(rec.Duration))
+	if askedSeed {
+		sampled = fmt.Sprintf("%d files sampled with seed %d in %s", len(rec.Files), rec.Seed, app.Round(rec.Duration))
+	}
+	fmt.Printf("  %s\n", s.Dim(sampled))
 	if receiptPath != "" {
 		fmt.Printf("  %s\n", s.Dim("receipt: "+ui.Path(receiptPath, width-12)))
 	}

@@ -32,7 +32,7 @@ type App struct {
 // New builds the app from a configuration, including only the backends this
 // machine can actually read.
 func New(cfg config.Config, version string) *App {
-	a := &App{Config: cfg, Version: version, Runner: run.Runner{}}
+	a := &App{Config: cfg, Version: version, Runner: run.Runner{Timeout: run.TimeoutFromEnv()}}
 	if cfg.TimeMachineEnabled() {
 		tm := &tmbk.Backend{Runner: a.Runner}
 		if tm.Installed() {
@@ -100,6 +100,9 @@ type Doctor struct {
 	StaleAfter  time.Duration `json:"stale_after"`
 	Health      []Health      `json:"destinations"`
 	Problems    int           `json:"problems"`
+	// NothingReadable is true when not one destination could be read, which is
+	// the answer that matters more than any single row.
+	NothingReadable bool `json:"nothing_readable"`
 }
 
 // StaleAfter is how old a backup may be before doctor complains: the override
@@ -121,9 +124,10 @@ func (a *App) Doctor(ctx context.Context, now time.Time) (Doctor, error) {
 	rep := Doctor{GeneratedAt: now, StaleAfter: stale}
 	if len(pairs) == 0 {
 		rep.Problems++
+		rep.NothingReadable = true
 		rep.Health = append(rep.Health, Health{
-			Dest:    backend.Destination{State: backend.StateUnreachable},
-			Problem: "no backup system was found on this machine at all",
+			Dest:    backend.Destination{Backend: "none", State: backend.StateUnreachable, NotConfigured: true},
+			Problem: NoBackupSystem,
 		})
 		return rep, nil
 	}
@@ -133,6 +137,7 @@ func (a *App) Doctor(ctx context.Context, now time.Time) (Doctor, error) {
 			readable++
 		}
 	}
+	rep.NothingReadable = readable == 0
 	for _, p := range pairs {
 		h := Health{Dest: p.Dest}
 		if t, ok := state.LastDrill(p.Dest.ID); ok {
@@ -232,6 +237,10 @@ func (a *App) Drill(ctx context.Context, p Pair, snap backend.Snapshot, opts dri
 	path, saveErr := state.SaveReceipt(rec)
 	return rec, path, saveErr
 }
+
+// NoBackupSystem is the problem reported on a machine where nothing at all could
+// be read as a backup.
+const NoBackupSystem = "no backup system was found on this machine at all"
 
 // Round shortens a duration for reading.
 func Round(d time.Duration) time.Duration {

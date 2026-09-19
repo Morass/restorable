@@ -89,7 +89,8 @@ func cmdBackends(ctx context.Context, a *app.App, args []string) (int, error) {
 	s := ui.NewStyle(os.Stdout)
 	width := ui.TerminalWidth(os.Stdout)
 	if len(pairs) == 0 {
-		fmt.Println("No backup system was found here. restorable reads Time Machine, restic and borg.")
+		fmt.Println("No backup system was found here.")
+		fmt.Println(noBackupHint())
 		return exitOK, nil
 	}
 	for _, p := range pairs {
