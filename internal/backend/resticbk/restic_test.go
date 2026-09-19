@@ -34,6 +34,8 @@ func stubRestic(t *testing.T, script string) (recorded func() string) {
 	}
 }
 
+// The fixture names no machine this test runs on, which is the fallback case:
+// every snapshot's paths are used and the destination carries a note.
 const snapshotsJSON = `[
  {"time":"2026-09-18T10:00:00+02:00","paths":["/Users/x/Documents"],"hostname":"box","id":"aaaaaaaabbbbbbbb","short_id":"aaaaaaaa"},
  {"time":"2026-09-19T10:00:00+02:00","paths":["/Users/x/Documents","/Users/x/code"],"hostname":"box","id":"ccccccccdddddddd","short_id":"cccccccc"}
@@ -80,6 +82,43 @@ JSON`)
 	}
 	if !strings.Contains(log, "--no-lock") {
 		t.Error("reading a repository must not take a lock")
+	}
+}
+
+func TestOnlyThisMachinesSnapshotsSayWhatIsCovered(t *testing.T) {
+	host, err := os.Hostname()
+	if err != nil {
+		t.Skip("no hostname")
+	}
+	stubRestic(t, `cat <<'JSON'
+[
+ {"time":"2026-09-18T10:00:00+02:00","paths":["/srv/other"],"hostname":"someone-elses-box","id":"aaaa","short_id":"aaaa"},
+ {"time":"2026-09-19T10:00:00+02:00","paths":["/Users/x/Documents"],"hostname":"`+host+`","id":"bbbb","short_id":"bbbb"}
+]
+JSON`)
+	dests, err := newBackend().Destinations(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := dests[0].Roots
+	if len(roots) != 1 || roots[0] != "/Users/x/Documents" {
+		t.Errorf("roots = %v, want only this machine's paths", roots)
+	}
+
+	// A repository that names no machine we recognise still says something: its
+	// paths are used, with a note, rather than reporting that nothing is kept.
+	stubRestic(t, `cat <<'JSON'
+[{"time":"2026-09-19T10:00:00+02:00","paths":["/srv/data"],"hostname":"a-container","id":"cccc","short_id":"cccc"}]
+JSON`)
+	dests, err = newBackend().Destinations(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dests[0].Roots) != 1 || dests[0].Roots[0] != "/srv/data" {
+		t.Errorf("roots = %v, want the fallback to every snapshot", dests[0].Roots)
+	}
+	if dests[0].Note == "" {
+		t.Error("the fallback must be said out loud")
 	}
 }
 
@@ -174,7 +213,7 @@ func TestRestoreAsksForEachFileAndFailsLoudly(t *testing.T) {
 		t.Fatal(err)
 	}
 	log := calls()
-	if !strings.Contains(log, "--include /x/a.txt") || !strings.Contains(log, "--include /x/b.txt") {
+	if !strings.Contains(log, "--include=/x/a.txt") || !strings.Contains(log, "--include=/x/b.txt") {
 		t.Errorf("restore did not ask for both files: %s", log)
 	}
 	if !strings.Contains(log, "--target "+target) {

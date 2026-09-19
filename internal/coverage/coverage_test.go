@@ -2,6 +2,7 @@ package coverage_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -338,5 +339,69 @@ func TestDestinationsThatCouldNotBeReadDoNotProtectAnything(t *testing.T) {
 	}
 	if len(rep.Unprotected()) == 0 {
 		t.Error("a locked destination must not count as cover")
+	}
+}
+
+func TestADisconnectedDestinationDoesNotCountAsCover(t *testing.T) {
+	root := tree(t, map[string]string{"work/a.txt": "aaaa"})
+	b := fake.New(backend.TimeMachine, "Backup Disk", []string{"/"}, "snap", nil)
+	// The disk is configured and was written to yesterday, but it is not here.
+	b.Dest.Connected = false
+
+	rep, err := coverage.Run(context.Background(), coverage.Options{Roots: []string{root}}, protectors(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	holes := rep.Unprotected()
+	if len(holes) == 0 {
+		t.Fatal("a destination that is not connected is not keeping anything right now")
+	}
+	if !strings.Contains(holes[0].Detail, "not connected") {
+		t.Errorf("detail = %q, want it to say the destination is away", holes[0].Detail)
+	}
+}
+
+func TestAQuestionThatCouldNotBeAnsweredIsNotCover(t *testing.T) {
+	root := tree(t, map[string]string{"work/a.txt": "aaaa"})
+	b := fake.New(backend.TimeMachine, "disk", []string{"/"}, "snap", nil)
+	b.ExcludeErr = errors.New("tmutil: timed out")
+
+	rep, err := coverage.Run(context.Background(), coverage.Options{Roots: []string{root}}, protectors(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Unprotected()) != 0 {
+		t.Errorf("an unanswered question is not a hole either: %+v", rep.Unprotected())
+	}
+	unknown := rep.Unknowns()
+	if len(unknown) == 0 {
+		t.Fatalf("an unanswered question must be reported; findings: %+v", rep.Findings)
+	}
+	if !strings.Contains(unknown[0].Detail, "could not ask") {
+		t.Errorf("detail = %q, want it to say the question could not be asked", unknown[0].Detail)
+	}
+}
+
+func TestLooseFilesBesideAKeptSubdirectoryAreAHole(t *testing.T) {
+	root := tree(t, map[string]string{
+		"data/kept/a.txt": "aaaa",
+		"data/loose.txt":  "bbbbbbbb",
+		"data/loose2.txt": "cc",
+	})
+	b := fake.New(backend.Restic, "repo", []string{filepath.Join(root, "data", "kept")}, "snap", nil)
+
+	rep, err := coverage.Run(context.Background(), coverage.Options{Roots: []string{root}}, protectors(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, ok := findingFor(rep, filepath.Join(root, "data"))
+	if !ok {
+		t.Fatalf("the loose files were left out of the verdict; findings: %+v", rep.Findings)
+	}
+	if f.Files != 2 || f.Bytes != 10 {
+		t.Errorf("finding = %+v, want the two loose files (10 bytes)", f)
+	}
+	if rep.UnprotectedFiles != 2 {
+		t.Errorf("unprotected files = %d, want 2", rep.UnprotectedFiles)
 	}
 }

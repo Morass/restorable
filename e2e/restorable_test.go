@@ -153,21 +153,22 @@ func TestCoverageExplainsATimeMachineExclusion(t *testing.T) {
 	w := newWorld(t)
 	w.writeFile("data/work/keep.txt", "hello")
 	w.writeFile("data/Library/Caches/big.bin", strings.Repeat("c", 8192))
-	// A Mac with Time Machine configured, which excludes caches like every Mac.
+	// A Mac with Time Machine configured and its disk connected, excluding
+	// caches the way every Mac does.
 	w.stubTool("RESTORABLE_TMUTIL", "tmutil", `case "$1" in
 destinationinfo) cat <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0"><dict><key>Destinations</key><array><dict>
 <key>Name</key><string>Backup Disk</string><key>Kind</key><string>Local</string>
-<key>ID</key><string>1111-2222</string></dict></array></dict></plist>
+<key>ID</key><string>1111-2222</string><key>MountPoint</key><string>/Volumes/Backup Disk</string></dict></array></dict></plist>
 PLIST
 ;;
-isexcluded) shift; for p in "$@"; do case "$p" in
+isexcluded) shift; [ "$1" = "--" ] && shift; for p in "$@"; do case "$p" in
   */Caches) echo "[Excluded]  $p";;
   *) echo "[Included]  $p";;
 esac; done;;
 listlocalsnapshotdates) echo "Snapshot dates for all disks:"; echo "2099-01-01-120000";;
-listbackups) exit 1;;
+listbackups) echo "/Volumes/Backup Disk/Backups.backupdb/box/2099-01-01-120000";;
 *) exit 1;;
 esac`)
 
@@ -385,5 +386,76 @@ func TestAHangingToolDoesNotHangTheTool(t *testing.T) {
 		}
 	case <-time.After(70 * time.Second):
 		t.Fatal("the tool waited for a hanging tmutil instead of giving up")
+	}
+}
+
+func TestARepositoryUrlWithCredentialsIsNeverEchoed(t *testing.T) {
+	w := newWorld(t)
+	w.noTimeMachine()
+	// A repository location that carries credentials, as several restic
+	// backends allow. Nothing restorable prints or writes may hold the secret.
+	// The repository answers through a stub, so the test needs no network.
+	w.Env["RESTIC_REPOSITORY"] = "rest:https://alice:hunter2@backup.example.org/repo"
+	w.Env["RESTIC_PASSWORD"] = "correct-horse-battery"
+	w.Env["RESTORABLE_WIDTH"] = "200"
+	w.stubTool("RESTORABLE_RESTIC", "restic", `echo '[{"time":"2026-09-19T10:00:00+02:00","paths":["`+w.Home+`"],"hostname":"'$(hostname)'","id":"aaaa","short_id":"aaaa"}]'`)
+
+	for _, args := range [][]string{{"doctor"}, {"doctor", "--json"}, {"backends"}, {"coverage", w.Home}} {
+		res := w.run(args...)
+		for _, secret := range []string{"hunter2", "correct-horse-battery"} {
+			if strings.Contains(res.Stdout+res.Stderr, secret) {
+				t.Errorf("%v printed a secret:\n%s%s", args, res.Stdout, res.Stderr)
+			}
+		}
+		if !strings.Contains(res.Stdout, "backup.example.org") && args[0] != "coverage" {
+			t.Errorf("%v hid the whole repository; the user must still recognise it:\n%s", args, res.Stdout)
+		}
+	}
+}
+
+func TestADrillNeverRestoresOverLiveFiles(t *testing.T) {
+	w := newWorld(t)
+	w.noTimeMachine()
+	w.writeFile("work/a.txt", "the live bytes")
+	w.restic(filepath.Join(w.Home, "work"))
+
+	// Someone points --target at their own home, the worst thing they could do.
+	res := w.run("drill", "--count", "3", "--seed", "1", "--target", w.Home)
+	if res.Code != 0 {
+		t.Fatalf("drill exited %d:\n%s%s", res.Code, res.Stdout, res.Stderr)
+	}
+	live, err := os.ReadFile(filepath.Join(w.Home, "work", "a.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(live) != "the live bytes" {
+		t.Errorf("the live file was written over during a drill: %q", live)
+	}
+	// And the restore went into a directory of its own, which was cleaned up.
+	entries, err := filepath.Glob(filepath.Join(w.Home, "restorable-drill-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("a drill without --keep left %v behind", entries)
+	}
+}
+
+func TestASecondConfigWriteDoesNotFollowASymlink(t *testing.T) {
+	w := newWorld(t)
+	w.noTimeMachine()
+	path := strings.TrimSpace(w.mustRun(0, "config", "--path").Stdout)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(w.Home, "somewhere-else.json")
+	if err := os.Symlink(victim, path); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if res := w.run("config", "--write"); res.Code == 0 {
+		t.Error("writing through a symlink must be refused")
+	}
+	if _, err := os.Stat(victim); err == nil {
+		t.Error("config --write created the file the symlink pointed at")
 	}
 }

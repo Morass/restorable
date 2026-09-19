@@ -46,6 +46,15 @@ type Destination struct {
 	// NotConfigured marks a backup system that exists on this machine but has
 	// never been set up. It is only a problem when nothing else is.
 	NotConfigured bool `json:"not_configured,omitempty"`
+	// Connected says the destination itself answered just now. A date read from
+	// a record of past backups is worth reporting, but a disk that is not here
+	// is not covering anything today.
+	Connected bool `json:"connected"`
+	// Mount is where the destination is mounted, when it is.
+	Mount string `json:"mount,omitempty"`
+	// Note carries something the reader should know about how this destination
+	// was read, when it is not a problem in itself.
+	Note string `json:"note,omitempty"`
 
 	Snapshots int       `json:"snapshots"`
 	LastOK    time.Time `json:"last_ok,omitempty"` // newest completed snapshot

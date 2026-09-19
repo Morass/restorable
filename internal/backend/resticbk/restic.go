@@ -6,11 +6,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/morass/restorable/internal/backend"
+	"github.com/morass/restorable/internal/redact"
 	"github.com/morass/restorable/internal/run"
+	"github.com/morass/restorable/internal/safe"
 )
 
 // Repo is one configured restic repository.
@@ -59,19 +62,31 @@ type snapJSON struct {
 func (b *Backend) Destinations(ctx context.Context) ([]backend.Destination, error) {
 	var out []backend.Destination
 	for _, r := range b.Repos {
-		d := backend.Destination{Backend: backend.Restic, ID: r.Repo, Label: r.Name}
+		d := backend.Destination{Backend: backend.Restic, ID: redact.Location(r.Repo), Label: redact.Location(r.Name)}
 		snaps, err := b.snapshots(ctx, r)
 		switch {
 		case err != nil:
 			d.State, d.Err = classify(err)
 		default:
 			d.State = backend.StateOK
+			d.Connected = true // the repository answered just now
 			d.Snapshots = len(snaps)
 			if n, ok := backend.Newest(snaps); ok {
 				d.LastOK = n.Time
 				d.LastOKSource = "restic snapshots"
 			}
-			d.Roots = rootsOf(snaps)
+			// Only this machine's snapshots say what is covered here: a shared
+			// repository full of another host's files covers nothing local. If
+			// none of the snapshots name this host — a renamed machine, a
+			// repository written from a container — fall back to all of them
+			// rather than reporting that nothing is covered.
+			d.Roots = rootsOf(snaps, hostname())
+			if len(d.Roots) == 0 {
+				d.Roots = rootsOf(snaps, "")
+				if len(d.Roots) > 0 {
+					d.Note = "no snapshot in this repository names this machine, so its paths are taken from every snapshot"
+				}
+			}
 		}
 		out = append(out, d)
 	}
@@ -87,9 +102,11 @@ func (b *Backend) Snapshots(ctx context.Context, d backend.Destination) ([]backe
 	return b.snapshots(ctx, r)
 }
 
+// repo finds the configured repository a destination stands for. The
+// destination's id is the redacted location, so the match is made on that.
 func (b *Backend) repo(d backend.Destination) (Repo, bool) {
 	for _, r := range b.Repos {
-		if r.Repo == d.ID {
+		if redact.Location(r.Repo) == d.ID {
 			return r, true
 		}
 	}
@@ -141,8 +158,14 @@ func (b *Backend) List(ctx context.Context, d backend.Destination, snapshot, pat
 	if !ok {
 		return nil, fmt.Errorf("restic: no configured repository for %q", d.ID)
 	}
+	if err := safe.SnapshotID(snapshot); err != nil {
+		return nil, err
+	}
 	args := []string{"--json", "--no-lock", "ls", snapshot}
 	if path != "" {
+		if err := safe.Argument("path", path); err != nil {
+			return nil, err
+		}
 		args = append(args, path)
 	}
 	res, err := b.runner(r).Run(ctx, run.Restic, args...)
@@ -179,9 +202,16 @@ func (b *Backend) Restore(ctx context.Context, d backend.Destination, snapshot s
 	if len(files) == 0 {
 		return fmt.Errorf("restic restore: no files asked for")
 	}
+	if err := safe.SnapshotID(snapshot); err != nil {
+		return err
+	}
 	args := []string{"--json", "--no-lock", "restore", snapshot, "--target", target}
 	for _, f := range files {
-		args = append(args, "--include", f)
+		if err := safe.Argument("path", f); err != nil {
+			return err
+		}
+		// --include=VALUE, so a path can never be read as a flag of its own.
+		args = append(args, "--include="+f)
 	}
 	rr := b.runner(r)
 	if rr.Timeout == 0 {
@@ -197,10 +227,22 @@ func (b *Backend) Restore(ctx context.Context, d backend.Destination, snapshot s
 	return nil
 }
 
-func rootsOf(snaps []backend.Snapshot) []string {
+// hostname is this machine's name as restic records it in a snapshot.
+func hostname() string {
+	h, err := os.Hostname()
+	if err != nil {
+		return ""
+	}
+	return h
+}
+
+func rootsOf(snaps []backend.Snapshot, host string) []string {
 	seen := map[string]bool{}
 	var roots []string
 	for _, s := range snaps {
+		if host != "" && s.Host != "" && !strings.EqualFold(s.Host, host) {
+			continue // another machine's snapshot
+		}
 		for _, p := range s.Paths {
 			if !seen[p] {
 				seen[p] = true
@@ -232,7 +274,7 @@ func classify(err error) (backend.State, string) {
 func firstLine(b []byte) string { return firstLineStr(string(b)) }
 
 func firstLineStr(s string) string {
-	s = strings.TrimSpace(s)
+	s = redact.Secrets(strings.TrimSpace(s))
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
 		s = s[:i]
 	}
@@ -248,8 +290,14 @@ func (b *Backend) Walk(ctx context.Context, d backend.Destination, snapshot, pat
 	if !ok {
 		return fmt.Errorf("restic: no configured repository for %q", d.ID)
 	}
+	if err := safe.SnapshotID(snapshot); err != nil {
+		return err
+	}
 	args := []string{"--json", "--no-lock", "ls", snapshot}
 	if path != "" {
+		if err := safe.Argument("path", path); err != nil {
+			return err
+		}
 		args = append(args, path)
 	}
 	return b.runner(r).Stream(ctx, run.Restic, args, func(line []byte) error {

@@ -13,6 +13,8 @@ import (
 
 	"github.com/morass/restorable/internal/app"
 	"github.com/morass/restorable/internal/config"
+	"github.com/morass/restorable/internal/redact"
+	"github.com/morass/restorable/internal/ui"
 )
 
 // Version is the build's version, set at link time for a release.
@@ -49,7 +51,7 @@ func runMain(args []string) int {
 
 	cfg, err := config.Load()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "restorable: "+err.Error())
+		fmt.Fprintln(os.Stderr, "restorable: "+ui.Safe(err.Error()))
 		return exitError
 	}
 	a := app.New(cfg, Version)
@@ -79,7 +81,7 @@ func runMain(args []string) int {
 			fmt.Fprintln(os.Stderr, "restorable: stopped")
 			return exitError
 		}
-		fmt.Fprintln(os.Stderr, "restorable: "+runErr.Error())
+		fmt.Fprintln(os.Stderr, "restorable: "+ui.Safe(redact.Secrets(runErr.Error())))
 		if code == exitOK {
 			code = exitError
 		}

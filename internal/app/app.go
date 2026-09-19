@@ -146,7 +146,9 @@ func (a *App) Doctor(ctx context.Context, now time.Time) (Doctor, error) {
 		}
 		switch p.Dest.State {
 		case backend.StateOK:
-			if p.Dest.LastOK.IsZero() {
+			if !p.Dest.Connected {
+				h.Problem = "the destination is not connected, so nothing is being backed up to it right now"
+			} else if p.Dest.LastOK.IsZero() {
 				h.Problem = "it has never completed a backup"
 			} else {
 				h.Age = now.Sub(p.Dest.LastOK)

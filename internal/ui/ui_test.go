@@ -146,3 +146,24 @@ func TestTerminalWidthCanBeFixedForScreenshots(t *testing.T) {
 		t.Errorf("width = %d, want the fixed 72", got)
 	}
 }
+
+func TestAFileNameCannotRepaintTheTerminal(t *testing.T) {
+	// A file called "notes\x1b[2J\x1b[H(nothing here)" would clear the screen if
+	// its name were printed as it is.
+	hostile := "/tmp/notes\x1b[2J\x1b[Hgone\r\x07"
+	got := ui.Safe(hostile)
+	for _, bad := range []string{"\x1b", "\r", "\x07"} {
+		if strings.Contains(got, bad) {
+			t.Errorf("Safe kept %q in %q", bad, got)
+		}
+	}
+	if !strings.Contains(got, "notes") || !strings.Contains(got, "gone") {
+		t.Errorf("Safe = %q, want the readable parts kept", got)
+	}
+	if ui.Safe("/Users/x/Documents/a b.txt") != "/Users/x/Documents/a b.txt" {
+		t.Error("an ordinary name must pass through untouched")
+	}
+	if !strings.Contains(ui.Path(hostile, 0), "\\x1b") {
+		t.Errorf("Path must sanitise too: %q", ui.Path(hostile, 0))
+	}
+}

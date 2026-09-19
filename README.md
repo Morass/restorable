@@ -86,7 +86,9 @@ restorable doctor --stale-after 24h
 
 Each row says where the date came from, because on a Mac it can come from the
 mounted backup disk, from Time Machine's own record, or only from a local
-snapshot — and those mean different things. `doctor` exits 1 when anything is
+snapshot — and those mean different things. A destination that is configured but
+not plugged in reads as **not connected**: it may have a recent backup on it, but
+it is not keeping anything today. `doctor` exits 1 when anything is
 wrong, so it fits in a cron job or a login script.
 
 ### 3. Proof that a restore works
@@ -99,10 +101,15 @@ restorable drill --keep --target /tmp/drill
 
 <p align="center"><img src="docs/images/drill.svg" alt="drill restoring sampled files and reporting that each came back byte for byte" width="860"></p>
 
-The sampled files are restored into a temporary directory and hashed against the
-live copies. A file you edited after the snapshot is reported as **changed**, not
-as a failure; a file whose bytes differ although nothing edited it, or that the
-backup will not hand back at all, is a **failure** and exits 1.
+The sampled files are restored into a directory the drill makes for itself and
+hashed against the live copies. A file you edited after the snapshot is reported
+as **changed**, not as a failure; a file whose bytes differ although nothing
+edited it, or that the backup will not hand back at all, is a **failure** and
+exits 1. If nothing could be compared — everything sampled was edited, deleted or
+unreadable — the drill says so and does not call that a pass.
+
+The sample comes from your home directory inside the snapshot; `--path` picks
+another part of it.
 
 Every drill writes a receipt, so the machine keeps a track record instead of one
 good day:
@@ -155,7 +162,7 @@ restorable drill --help      # the same
 |---|---|
 | `restorable coverage [path...]` | List what no backup keeps, largest first. `--json`, `--strict`, `--min-size`, `--files`, `--all`, `--depth`, `--cross-filesystems` |
 | `restorable doctor` | Whether each destination is readable and recent. `--stale-after`, `--json`. Exits 1 on any problem |
-| `restorable drill` | Restore a sample and compare the bytes. `--dest`, `--count`, `--seed`, `--max-size`, `--target`, `--keep`, `--json`. Exits 1 on any failure |
+| `restorable drill` | Restore a sample and compare the bytes. `--dest`, `--path`, `--count`, `--seed`, `--max-size`, `--target`, `--keep`, `--json`. Exits 1 on any failure |
 | `restorable history` | Past drills, newest first. `--limit`, `--json` |
 | `restorable backends` | Which backup systems can be read here, and what they cover |
 | `restorable config` | Where the configuration lives, and an example. `--path`, `--example`, `--write` |
@@ -183,7 +190,12 @@ restorable drill --help      # the same
 
 - **Claiming is not holding.** `coverage` answers from what a destination covers
   and excludes, which is fast and can be wrong if a backup silently failed for one
-  file. That is what `drill` is for.
+  file, or if it was told to exclude something restic does not record. That is what
+  `drill` is for.
+- A restic repository says what it covers through the paths of **this machine's**
+  snapshots; a shared repository full of another host's files covers nothing here.
+- When a destination claims a path but cannot be asked whether it keeps it, the
+  report says the answer is **unknown** rather than guessing either way.
 - By default it asks about **directories, not single files**; `--files` is slower
   and catches files excluded by hand.
 - It reads **Time Machine and restic** today. A Time Machine drill needs the

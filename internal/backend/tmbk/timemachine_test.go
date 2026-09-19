@@ -186,7 +186,7 @@ esac`)
 
 func TestExclusionsAreAskedInOneCallAndKeptInOrder(t *testing.T) {
 	calls := stubTmutil(t, `case "$1" in
-isexcluded) shift; for p in "$@"; do case "$p" in
+isexcluded) shift; [ "$1" = "--" ] && shift; for p in "$@"; do case "$p" in
   */Caches) echo "[Excluded]  $p";;
   *) echo "[Included]  $p";;
 esac; done;;
@@ -298,5 +298,67 @@ func TestWalkListsTheLivePathsABackupHolds(t *testing.T) {
 		if !strings.HasPrefix(p, "/Users/x/") {
 			t.Errorf("walked %q, want the live path, not the path inside the backup", p)
 		}
+	}
+}
+
+func TestARestoreWillNotWriteThroughASymlink(t *testing.T) {
+	backupRoot := t.TempDir()
+	src := filepath.Join(backupRoot, "Users", "x")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "a.txt"), []byte("from the backup"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	target := t.TempDir()
+	victim := filepath.Join(t.TempDir(), "important.conf")
+	if err := os.WriteFile(victim, []byte("do not touch"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Something has already put a symlink where the restore wants to write.
+	dst := filepath.Join(target, "Users", "x")
+	if err := os.MkdirAll(dst, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(dst, "a.txt")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	b := &tmbk.Backend{}
+	err := b.Restore(context.Background(), backend.Destination{}, backupRoot, []string{"/Users/x/a.txt"}, target)
+	if err == nil {
+		t.Error("writing through a symlink must be refused")
+	}
+	got, readErr := os.ReadFile(victim)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != "do not touch" {
+		t.Errorf("the file behind the symlink was overwritten with %q", got)
+	}
+}
+
+func TestAPathFromABackupCannotEscapeTheTarget(t *testing.T) {
+	backupRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(backupRoot, "etc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(backupRoot, "etc", "hosts"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	target := t.TempDir()
+	outside := filepath.Dir(target)
+
+	b := &tmbk.Backend{}
+	// A snapshot entry that tries to climb out of the target.
+	_ = b.Restore(context.Background(), backend.Destination{}, backupRoot,
+		[]string{"/etc/../../../../../../etc/hosts", "../../etc/hosts"}, target)
+
+	escaped, err := filepath.Glob(filepath.Join(outside, "etc"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(escaped) != 0 {
+		t.Errorf("a restore wrote outside its target: %v", escaped)
 	}
 }

@@ -10,11 +10,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/morass/restorable/internal/backend"
 	"github.com/morass/restorable/internal/plist"
+	"github.com/morass/restorable/internal/redact"
 	"github.com/morass/restorable/internal/run"
+	"github.com/morass/restorable/internal/safe"
 )
 
 // PreferencesPath is where Time Machine records its destinations and the date
@@ -93,6 +96,7 @@ func (b *Backend) Destinations(ctx context.Context) ([]backend.Destination, erro
 			Label:   strings.TrimSpace(d.Name),
 			Roots:   []string{"/"}, // Time Machine covers the volumes it is not told to skip
 			State:   backend.StateOK,
+			Mount:   d.MountPoint,
 		}
 		if dest.Label == "" {
 			dest.Label = d.Kind
@@ -110,6 +114,7 @@ func (b *Backend) fillLast(ctx context.Context, dest *backend.Destination, mount
 	if mount != "" {
 		if t, n, ok := b.latestOnDisk(ctx, mount); ok {
 			dest.LastOK, dest.LastOKSource, dest.Snapshots = t, "the mounted destination", n
+			dest.Connected = true
 			return
 		}
 	}
@@ -169,6 +174,9 @@ func (b *Backend) prefsReadable(ctx context.Context) bool {
 
 // latestOnDisk reads the backups on a mounted destination.
 func (b *Backend) latestOnDisk(ctx context.Context, mount string) (time.Time, int, bool) {
+	if err := safe.Argument("mount point", mount); err != nil {
+		return time.Time{}, 0, false
+	}
 	res, err := b.Runner.Run(ctx, run.Tmutil, "listbackups", "-m", "-d", mount)
 	if err != nil || res.ExitCode != 0 {
 		return time.Time{}, 0, false
@@ -206,11 +214,23 @@ func (b *Backend) latestLocalSnapshot(ctx context.Context) (time.Time, bool) {
 	return newest, !newest.IsZero()
 }
 
-// Snapshots lists the backups of a mounted destination, oldest first.
+// Snapshots lists the backups of one mounted destination, oldest first. The
+// destination's own mount point is used, so a machine with two backup disks
+// cannot have one disk's backups reported as the other's.
 func (b *Backend) Snapshots(ctx context.Context, d backend.Destination) ([]backend.Snapshot, error) {
 	args := []string{"listbackups", "-m"}
-	if root := b.backupRoot(); root != "" {
-		args = append(args, "-d", root)
+	switch {
+	case b.backupRoot() != "":
+		args = append(args, "-d", b.backupRoot())
+	case d.Mount != "":
+		// The mount point comes out of tmutil's own answer; it is still checked,
+		// because an argument that starts with '-' would be read as an option.
+		if err := safe.Argument("mount point", d.Mount); err != nil {
+			return nil, err
+		}
+		args = append(args, "-d", d.Mount)
+	case !d.Connected:
+		return nil, fmt.Errorf("%s is not mounted, so its backups cannot be listed", d.Label)
 	}
 	res, err := b.Runner.Run(ctx, run.Tmutil, args...)
 	if err != nil {
@@ -241,7 +261,8 @@ func (b *Backend) Excluded(ctx context.Context, _ backend.Destination, paths []s
 	if len(paths) == 0 {
 		return nil, nil
 	}
-	args := append([]string{"isexcluded"}, paths...)
+	// "--" so a path can never be read as an option, whatever it is called.
+	args := append([]string{"isexcluded", "--"}, paths...)
 	res, err := b.Runner.Run(ctx, run.Tmutil, args...)
 	if err != nil {
 		return nil, err
@@ -309,7 +330,10 @@ func stdExclusionReason(path string) string {
 // List returns what a backup holds under one path. A Time Machine backup is an
 // ordinary directory tree, so this is a directory read.
 func (b *Backend) List(_ context.Context, _ backend.Destination, snapshot, path string) ([]backend.File, error) {
-	dir := backupPath(snapshot, path)
+	dir, err := backupPath(snapshot, path)
+	if err != nil {
+		return nil, err
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
@@ -333,8 +357,14 @@ func (b *Backend) List(_ context.Context, _ backend.Destination, snapshot, path 
 // absolute layout. Nothing is ever written towards the backup.
 func (b *Backend) Restore(_ context.Context, _ backend.Destination, snapshot string, files []string, target string) error {
 	for _, f := range files {
-		src := backupPath(snapshot, f)
-		dst := filepath.Join(target, strings.TrimPrefix(filepath.Clean(f), "/"))
+		src, err := safe.Join(snapshot, f)
+		if err != nil {
+			return fmt.Errorf("read %s: %w", f, err)
+		}
+		dst, err := safe.Join(target, f)
+		if err != nil {
+			return fmt.Errorf("restore %s: %w", f, err)
+		}
 		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
 			return err
 		}
@@ -345,11 +375,11 @@ func (b *Backend) Restore(_ context.Context, _ backend.Destination, snapshot str
 	return nil
 }
 
-// backupPath joins a backup directory and an absolute path from the live disk.
-// Time Machine stores each volume under the backup, so the volume directory is
-// part of the snapshot id we were given.
-func backupPath(snapshot, path string) string {
-	return filepath.Join(snapshot, strings.TrimPrefix(filepath.Clean(path), "/"))
+// backupPath joins a backup directory and an absolute path from the live disk,
+// refusing anything that would read outside the backup. Time Machine stores each
+// volume under the backup, so the volume directory is part of the snapshot id.
+func backupPath(snapshot, path string) (string, error) {
+	return safe.Join(snapshot, path)
 }
 
 func copyFile(src, dst string) error {
@@ -358,7 +388,9 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	// O_NOFOLLOW: a restore writes a new file, never through a symlink that is
+	// already sitting at that name.
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return err
 	}
@@ -401,7 +433,7 @@ func parseSnapshotDate(line string) (time.Time, bool) {
 }
 
 func firstLine(b []byte) string {
-	s := strings.TrimSpace(string(b))
+	s := redact.Secrets(strings.TrimSpace(string(b)))
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
 		s = s[:i]
 	}
@@ -414,7 +446,14 @@ func firstLine(b []byte) string {
 // Walk streams what a backup holds under a path: a Time Machine backup is a
 // directory tree, so this is a filesystem walk that never leaves it.
 func (b *Backend) Walk(_ context.Context, _ backend.Destination, snapshot, path string, fn func(backend.File) error) error {
-	root := backupPath(snapshot, path)
+	root := snapshot
+	if path != "" {
+		var err error
+		root, err = backupPath(snapshot, path)
+		if err != nil {
+			return err
+		}
+	}
 	return filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil

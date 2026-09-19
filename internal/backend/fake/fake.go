@@ -47,7 +47,7 @@ func New(kind backend.Kind, label string, roots []string, snapshot string, files
 		Name: kind,
 		Dest: backend.Destination{
 			Backend: kind, ID: "fake:" + label, Label: label,
-			Roots: roots, State: backend.StateOK, Snapshots: 1,
+			Roots: roots, State: backend.StateOK, Snapshots: 1, Connected: true,
 		},
 		Snaps:    []backend.Snapshot{{ID: snapshot, Paths: roots}},
 		Contents: map[string]map[string][]byte{snapshot: files},

@@ -76,7 +76,7 @@ wait_for() {
 }
 shot() { # shot NAME "window title"
 	$T capture-pane -e -p -t t |
-		sed -e "s#$DEMO_HOME#$DISPLAY_HOME#g" -e "s#$W#/tmp/backup#g" |
+		sed -e "s#/private$DEMO_HOME#$DISPLAY_HOME#g" -e "s#$DEMO_HOME#$DISPLAY_HOME#g" -e "s#/private$W#/tmp/backup#g" -e "s#$W#/tmp/backup#g" |
 		"$W/ansi2svg" -title "$2" -cols $COLS >"$OUT/$1.svg"
 	# A picture of nothing is worse than no picture: refuse an empty capture.
 	if [ "$(wc -c <"$OUT/$1.svg")" -lt 900 ]; then

@@ -34,6 +34,15 @@ func (p *Protector) Label() string {
 	return string(p.Dest.Backend)
 }
 
+// shortError trims a tool's complaint to something a table can hold.
+func shortError(err error) string {
+	msg := strings.ReplaceAll(err.Error(), "\n", " ")
+	if len(msg) > 120 {
+		msg = msg[:120] + "…"
+	}
+	return msg
+}
+
 // Kind is the class of finding.
 type Kind string
 
@@ -46,6 +55,8 @@ const (
 	Unreadable Kind = "unreadable"
 	// Skipped means restorable did not look on purpose.
 	Skipped Kind = "skipped"
+	// Unknown means a destination claims the path but could not be asked about it.
+	Unknown Kind = "unknown"
 )
 
 // Finding is one hole, or one place the walk stopped.
@@ -141,7 +152,7 @@ func Run(ctx context.Context, opts Options, protectors []*Protector) (Report, er
 	for _, p := range protectors {
 		rep.Destinations = append(rep.Destinations, p.Dest)
 	}
-	w := &walker{opts: opts, protectors: protectors, rep: &rep, repos: repositoryPaths(protectors)}
+	w := &walker{ctx: ctx, opts: opts, protectors: protectors, rep: &rep, repos: repositoryPaths(protectors)}
 
 	home, _ := os.UserHomeDir()
 	w.home = home
@@ -175,6 +186,7 @@ func Run(ctx context.Context, opts Options, protectors []*Protector) (Report, er
 }
 
 type walker struct {
+	ctx        context.Context
 	opts       Options
 	protectors []*Protector
 	rep        *Report
@@ -201,6 +213,9 @@ const (
 	protectedYes protection = iota
 	protectedNo
 	protectedExcluded
+	// protectedUnknown means a destination claims the path but could not be
+	// asked whether it keeps it. Reporting that as cover would be a guess.
+	protectedUnknown
 )
 
 // claimsBelow reports whether any readable destination covers something strictly
@@ -208,7 +223,7 @@ const (
 func (w *walker) claimsBelow(path string) bool {
 	prefix := strings.TrimSuffix(filepath.Clean(path), "/") + "/"
 	for _, p := range w.protectors {
-		if p.Dest.State != backend.StateOK {
+		if p.Dest.State != backend.StateOK || !p.Dest.Connected {
 			continue
 		}
 		for _, r := range p.Dest.Roots {
@@ -224,7 +239,9 @@ func (w *walker) claimsBelow(path string) bool {
 func (w *walker) statusOf(ctx context.Context, path string) (protection, string) {
 	var claimed []*Protector
 	for _, p := range w.protectors {
-		if p.Dest.State != backend.StateOK {
+		// A destination that is not here right now covers nothing right now,
+		// however recent the date it last recorded.
+		if p.Dest.State != backend.StateOK || !p.Dest.Connected {
 			continue
 		}
 		if p.Dest.Claims(path) {
@@ -235,12 +252,14 @@ func (w *walker) statusOf(ctx context.Context, path string) (protection, string)
 		return protectedNo, w.noBackupDetail()
 	}
 	var reasons []string
+	var unknown []string
 	for _, p := range claimed {
 		ex, err := w.exclusion(ctx, p, path)
 		if err != nil {
-			// An exclusion question that cannot be answered is reported as
-			// protected: claiming otherwise would invent a hole.
-			return protectedYes, ""
+			// A question that could not be answered is not an answer: say so
+			// rather than reporting cover nobody proved.
+			unknown = append(unknown, p.Label()+": "+shortError(err))
+			continue
 		}
 		if !ex.Excluded {
 			return protectedYes, ""
@@ -251,17 +270,26 @@ func (w *walker) statusOf(ctx context.Context, path string) (protection, string)
 		}
 		reasons = append(reasons, p.Label()+": "+reason)
 	}
+	if len(unknown) > 0 {
+		return protectedUnknown, "could not ask whether it is kept — " + strings.Join(unknown, "; ")
+	}
 	return protectedExcluded, strings.Join(reasons, "; ")
 }
 
 func (w *walker) noBackupDetail() string {
-	live := 0
+	live, away := 0, 0
 	for _, p := range w.protectors {
-		if p.Dest.State == backend.StateOK {
+		switch {
+		case p.Dest.State == backend.StateOK && p.Dest.Connected:
 			live++
+		case p.Dest.State == backend.StateOK:
+			away++
 		}
 	}
-	if live == 0 {
+	switch {
+	case live == 0 && away > 0:
+		return "the backup destination is not connected, so nothing is being kept right now"
+	case live == 0:
 		return "no backup destination could be read on this machine"
 	}
 	return "no backup destination covers this path"
@@ -296,7 +324,7 @@ const chunkSize = 256
 // prefetch asks every protector about many paths at once, in chunks.
 func (w *walker) prefetch(ctx context.Context, paths []string) {
 	for _, p := range w.protectors {
-		if p.Dest.State != backend.StateOK {
+		if p.Dest.State != backend.StateOK || !p.Dest.Connected {
 			continue
 		}
 		var missing []string
@@ -327,6 +355,9 @@ func (w *walker) prefetch(ctx context.Context, paths []string) {
 type pending struct {
 	path  string
 	depth int
+	// protected says a destination keeps this directory itself. A directory that
+	// is walked only because something deeper is kept is not protected.
+	protected bool
 }
 
 // walk visits the tree one depth at a time, so every exclusion question for a
@@ -378,11 +409,16 @@ func (w *walker) classify(ctx context.Context, dirs []pending) []pending {
 				w.count(b, f)
 				continue
 			}
+			d.protected = true
 			keep = append(keep, d)
 		case w.claimsBelow(d.path) && d.depth < w.opts.MaxDepth:
 			// Nothing keeps this directory itself, but a destination keeps
 			// something deeper: descend so the hole is reported where it is.
 			keep = append(keep, d)
+		case state == protectedUnknown:
+			b, f := w.rollup(d.path)
+			w.count(b, f)
+			w.addFinding(Finding{Path: d.path, Kind: Unknown, Detail: detail, Bytes: b, Files: f}, false)
 		default:
 			b, f := w.rollup(d.path)
 			w.count(b, f)
@@ -456,6 +492,16 @@ func (w *walker) read(ctx context.Context, dir pending) ([]pending, error) {
 	}
 	w.count(bytes, files)
 
+	// A directory can be walked although nothing keeps it, because a backup keeps
+	// something deeper. Its own loose files are then holes, and saying nothing
+	// about them would leave them out of the verdict entirely.
+	if !dir.protected && files > 0 {
+		w.addFinding(Finding{
+			Path: dir.path, Kind: NoBackup, Bytes: bytes, Files: files,
+			Detail: "the files directly in it are kept by no backup (what is kept lives deeper)",
+		}, true)
+	}
+
 	if w.opts.CheckFiles && len(plainFiles) > 0 {
 		w.prefetch(ctx, plainFiles)
 		for _, f := range plainFiles {
@@ -498,7 +544,13 @@ func (w *walker) rollup(root string) (int64, int) {
 	var bytes int64
 	var files int
 	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if w.ctx != nil && w.ctx.Err() != nil {
+			return w.ctx.Err()
+		}
 		if err != nil {
+			if p != root {
+				w.addFinding(Finding{Path: p, Kind: Unreadable, Detail: readableError(err)}, false)
+			}
 			return nil
 		}
 		info, err := d.Info()
@@ -513,6 +565,13 @@ func (w *walker) rollup(root string) (int64, int) {
 			return nil
 		case d.IsDir():
 			if p != root && !w.sameFilesystem(info) {
+				return fs.SkipDir
+			}
+			// The same folders are left alone here as in the walk proper:
+			// reading them would make macOS ask the user for permission.
+			if p != root && w.skipLocation(p) {
+				w.addFinding(Finding{Path: p, Kind: Skipped,
+					Detail: "a folder macOS guards behind a permission prompt (use --all to include it)"}, false)
 				return fs.SkipDir
 			}
 			w.rep.Dirs++
@@ -574,6 +633,17 @@ func readableError(err error) string {
 		msg = pe.Err.Error()
 	}
 	return msg
+}
+
+// Unknowns returns the places a destination claims but could not be asked about.
+func (r Report) Unknowns() []Finding {
+	var out []Finding
+	for _, f := range r.Findings {
+		if f.Kind == Unknown {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // Unprotected returns only the findings that are real holes.

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/morass/restorable/internal/drill"
@@ -46,16 +47,37 @@ func SaveReceipt(r drill.Receipt) (string, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
-	name := fmt.Sprintf("%s-%s.json", r.RanAt.UTC().Format("20060102-150405"), safe(string(r.Backend)))
-	path := filepath.Join(dir, name)
 	data, err := json.MarshalIndent(r, "", "  ")
 	if err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
-		return "", err
+	stamp := r.RanAt.UTC().Format("20060102-150405")
+	// A receipt is written to a name of its own, created exclusively and never
+	// through a symlink, so an existing file's mode or destination cannot be
+	// inherited.
+	for attempt := 0; attempt < 100; attempt++ {
+		name := fmt.Sprintf("%s-%s.json", stamp, safeName(string(r.Backend)))
+		if attempt > 0 {
+			name = fmt.Sprintf("%s-%s-%d.json", stamp, safeName(string(r.Backend)), attempt)
+		}
+		path := filepath.Join(dir, name)
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+		if os.IsExist(err) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		if _, err := f.Write(append(data, '\n')); err != nil {
+			f.Close()
+			return "", err
+		}
+		if err := f.Close(); err != nil {
+			return "", err
+		}
+		return path, nil
 	}
-	return path, nil
+	return "", fmt.Errorf("could not write a receipt in %s", dir)
 }
 
 // Receipts reads past drills, newest first.
@@ -111,7 +133,7 @@ func LastDrill(destination string) (time.Time, bool) {
 	return time.Time{}, false
 }
 
-func safe(s string) string {
+func safeName(s string) string {
 	var b strings.Builder
 	for _, r := range s {
 		switch {

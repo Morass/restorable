@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/morass/restorable/internal/backend"
+	"github.com/morass/restorable/internal/safe"
 )
 
 // Status is what happened to one sampled file.
@@ -57,20 +58,25 @@ type FileResult struct {
 // Receipt is the record of one drill, written to the state directory so a machine
 // keeps a track record rather than a single good day.
 type Receipt struct {
-	Tool        string        `json:"tool"`
-	Version     string        `json:"version"`
-	RanAt       time.Time     `json:"ran_at"`
-	Backend     backend.Kind  `json:"backend"`
-	Destination string        `json:"destination"`
-	Label       string        `json:"label,omitempty"`
-	Snapshot    string        `json:"snapshot"`
-	SnapshotAt  time.Time     `json:"snapshot_at"`
-	Seed        int64         `json:"seed"`
-	Asked       int           `json:"asked"`
-	Files       []FileResult  `json:"files"`
-	Duration    time.Duration `json:"duration"`
-	Pass        bool          `json:"pass"`
-	Note        string        `json:"note,omitempty"`
+	Tool        string       `json:"tool"`
+	Version     string       `json:"version"`
+	RanAt       time.Time    `json:"ran_at"`
+	Backend     backend.Kind `json:"backend"`
+	Destination string       `json:"destination"`
+	Label       string       `json:"label,omitempty"`
+	Snapshot    string       `json:"snapshot"`
+	SnapshotAt  time.Time    `json:"snapshot_at"`
+	Seed        int64        `json:"seed"`
+	// Path is the part of the snapshot the sample was taken from.
+	Path     string        `json:"path,omitempty"`
+	Asked    int           `json:"asked"`
+	Files    []FileResult  `json:"files"`
+	Duration time.Duration `json:"duration"`
+	Pass     bool          `json:"pass"`
+	// Inconclusive is true when nothing went wrong and nothing was proved
+	// either: every sampled file was gone, edited since, or unreadable.
+	Inconclusive bool   `json:"inconclusive,omitempty"`
+	Note         string `json:"note,omitempty"`
 }
 
 // Counts summarises a receipt.
@@ -84,6 +90,11 @@ func (r Receipt) Counts() map[Status]int {
 
 // Options control one drill.
 type Options struct {
+	// Path scopes the sample to one directory of the snapshot. A Time Machine
+	// backup holds the whole disk and a restic repository can hold several
+	// machines, so a drill that sampled everything would walk millions of
+	// entries to test files the user does not care about.
+	Path     string
 	Count    int    // how many files to sample; default 12
 	Seed     int64  // 0 asks the clock, so two drills sample differently
 	MaxBytes int64  // skip files bigger than this; default 32 MiB
@@ -115,6 +126,7 @@ func Run(ctx context.Context, b backend.Backend, d backend.Destination, snap bac
 		Tool: "restorable", Version: opts.Version, RanAt: start,
 		Backend: d.Backend, Destination: d.ID, Label: d.Label,
 		Snapshot: snap.ID, SnapshotAt: snap.Time, Seed: opts.Seed, Asked: opts.Count,
+		Path: opts.Path,
 	}
 
 	walker, ok := b.(backend.Walker)
@@ -122,30 +134,62 @@ func Run(ctx context.Context, b backend.Backend, d backend.Destination, snap bac
 		return rec, fmt.Errorf("%s cannot list a snapshot, so it cannot be drilled", d.Backend)
 	}
 
-	sample, total, err := reservoir(ctx, walker, d, snap, opts)
+	// Which parts of the snapshot to sample from. A scope that is an ancestor of
+	// what the snapshot holds is turned into those roots: restic's own listing
+	// does not walk into the children of a path above its roots.
+	scopes := scopePaths(snap, opts.Path)
+	sample, total, err := reservoir(ctx, walker, d, snap, opts, scopes)
 	if err != nil {
 		return rec, err
 	}
+	// A scope that is not in this snapshot (a path recorded through a symlink,
+	// another machine's files, a directory that moved) must not read as a failed
+	// drill. Try the spellings the snapshot may have used, then the whole thing.
+	for _, alt := range alternatives(opts.Path) {
+		if len(sample) > 0 {
+			break
+		}
+		sample, total, err = reservoir(ctx, walker, d, snap, opts, scopePaths(snap, alt))
+		if err != nil {
+			return rec, err
+		}
+		if len(sample) > 0 {
+			rec.Path = alt
+			if alt == "" {
+				rec.Note = "sampled the whole snapshot: it holds nothing under " + opts.Path
+			}
+		}
+	}
 	if len(sample) == 0 {
-		rec.Note = fmt.Sprintf("the snapshot holds no file under %d bytes to sample (%d entries seen)", opts.MaxBytes, total)
+		where := "the snapshot"
+		if opts.Path != "" {
+			where = opts.Path + " in the snapshot"
+		}
+		rec.Note = fmt.Sprintf("%s holds no file under %d bytes to sample (%d entries seen)", where, opts.MaxBytes, total)
 		rec.Pass = false
 		rec.Duration = time.Since(start)
 		return rec, nil
 	}
 
-	target := opts.Target
-	if target == "" {
-		target, err = os.MkdirTemp("", "restorable-drill-*")
-		if err != nil {
+	// The restore always lands in a directory this drill made itself. A user who
+	// names a target gets a fresh directory inside it: pointing --target at /
+	// or at a home directory must never let a restore write over the live files
+	// it is supposed to be compared with.
+	parent := opts.Target
+	if parent == "" {
+		parent = os.TempDir()
+	} else {
+		if err := os.MkdirAll(parent, 0o700); err != nil {
 			return rec, err
 		}
-		if !opts.Keep {
-			defer os.RemoveAll(target)
-		}
-	} else if err := os.MkdirAll(target, 0o700); err != nil {
+	}
+	target, err := os.MkdirTemp(parent, "restorable-drill-*")
+	if err != nil {
 		return rec, err
 	}
-	if opts.Keep {
+	if !opts.Keep {
+		defer os.RemoveAll(target)
+	} else {
 		rec.Note = "restored copies kept in " + target
 	}
 
@@ -160,7 +204,12 @@ func Run(ctx context.Context, b backend.Backend, d backend.Destination, snap bac
 
 	for _, f := range sample {
 		res := FileResult{Path: f.Path, Bytes: f.Size}
-		restored := filepath.Join(target, strings.TrimPrefix(filepath.Clean(f.Path), "/"))
+		restored, joinErr := safe.Join(target, f.Path)
+		if joinErr != nil {
+			res.Status, res.Detail = Failed, "the backup holds an entry that is not a path this machine could have: "+shorten(joinErr.Error())
+			rec.Files = append(rec.Files, res)
+			continue
+		}
 		bh, err := hashFile(restored)
 		switch {
 		case err != nil && restoreErr != nil:
@@ -184,9 +233,23 @@ func Run(ctx context.Context, b backend.Backend, d backend.Destination, snap bac
 	})
 
 	rec.Pass = true
+	matched := 0
 	for _, f := range rec.Files {
 		if f.Status.Bad() {
 			rec.Pass = false
+		}
+		if f.Status == Match {
+			matched++
+		}
+	}
+	// Every sampled file being gone, changed or unreadable proves nothing: a
+	// drill that compared nothing has not passed, but it has not caught the
+	// backup out either.
+	if matched == 0 && len(rec.Files) > 0 {
+		rec.Inconclusive = rec.Pass
+		rec.Pass = false
+		if rec.Note == "" {
+			rec.Note = "nothing could be compared: every sampled file is gone from disk, was edited after the snapshot, or could not be read. Try --count with a larger sample, or --path a directory that does not change."
 		}
 	}
 	rec.Duration = time.Since(start)
@@ -221,13 +284,36 @@ func compareLive(f backend.File, snap backend.Snapshot, backupHash string) (Stat
 	return Differs, "the backup holds different bytes and the file has not been edited since", lh
 }
 
-// reservoir samples files from a snapshot in one pass, without holding the
-// listing in memory. It returns the sample and how many files were seen.
-func reservoir(ctx context.Context, w backend.Walker, d backend.Destination, snap backend.Snapshot, opts Options) ([]backend.File, int, error) {
+// scopePaths turns a wanted scope into the parts of this snapshot to walk. A
+// scope inside a snapshot root is used as it is; a scope that contains the roots
+// becomes those roots; a scope with nothing in common gives nothing.
+func scopePaths(snap backend.Snapshot, scope string) []string {
+	if scope == "" || len(snap.Paths) == 0 {
+		return []string{scope}
+	}
+	var under []string
+	for _, p := range snap.Paths {
+		switch {
+		case scope == p || strings.HasPrefix(scope, p+"/"):
+			return []string{scope} // the scope is inside what the snapshot holds
+		case strings.HasPrefix(p, scope+"/"):
+			under = append(under, p) // the snapshot holds something inside the scope
+		}
+	}
+	return under
+}
+
+// reservoir samples files from the given parts of a snapshot in one pass,
+// without holding the listing in memory. It returns the sample and how many
+// files were seen.
+func reservoir(ctx context.Context, w backend.Walker, d backend.Destination, snap backend.Snapshot, opts Options, scopes []string) ([]backend.File, int, error) {
+	if len(scopes) == 0 {
+		return nil, 0, nil
+	}
 	rnd := rand.New(rand.NewSource(opts.Seed))
 	sample := make([]backend.File, 0, opts.Count)
 	seen := 0
-	err := w.Walk(ctx, d, snap.ID, "", func(f backend.File) error {
+	take := func(f backend.File) error {
 		if f.Dir || f.Size <= 0 || f.Size > opts.MaxBytes {
 			return nil
 		}
@@ -240,7 +326,13 @@ func reservoir(ctx context.Context, w backend.Walker, d backend.Destination, sna
 			sample[j] = f
 		}
 		return nil
-	})
+	}
+	var err error
+	for _, scope := range scopes {
+		if err = w.Walk(ctx, d, snap.ID, scope, take); err != nil {
+			break
+		}
+	}
 	if err != nil {
 		return nil, seen, err
 	}
@@ -248,7 +340,42 @@ func reservoir(ctx context.Context, w backend.Walker, d backend.Destination, sna
 	return sample, seen, nil
 }
 
+// alternatives are the other spellings of a scope worth trying. A backup records
+// the path it was given, which may or may not be the one symlinks resolve to:
+// on a Mac /tmp and /private/tmp are the same directory and restic keeps
+// whichever was typed. The last candidate is no scope at all.
+func alternatives(path string) []string {
+	if path == "" {
+		return nil
+	}
+	seen := map[string]bool{path: true}
+	var out []string
+	add := func(p string) {
+		if p != "" && !seen[p] {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		add(resolved)
+	}
+	if strings.HasPrefix(path, "/private/") {
+		add(strings.TrimPrefix(path, "/private"))
+	} else {
+		add("/private" + path)
+	}
+	return append(out, "")
+}
+
 func hashFile(path string) (string, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		// A FIFO with no writer would block for ever, and a device is not data.
+		return "", fmt.Errorf("%s is not a regular file", filepath.Base(path))
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err

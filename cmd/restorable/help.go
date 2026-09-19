@@ -23,7 +23,8 @@ whether it covers each directory, and lists the largest places nothing keeps.
 
 A directory is a hole when no destination claims it, or when a destination claims
 it and excludes it — and then the reason is printed, as far as the system exposes
-it.
+it. A destination that is configured but not connected keeps nothing right now,
+and is reported that way rather than counted as cover.
 
 Examples
   restorable coverage                      walk the configured roots
@@ -71,7 +72,14 @@ written towards the backup, and the copies are removed unless --keep is given.
 
 A file that was edited after the snapshot is reported as changed, not as a
 failure. A file whose bytes differ although it has not been edited, or that the
-backup will not hand back at all, is a failure and exits 1.
+backup will not hand back at all, is a failure and exits 1. If nothing could be
+compared at all — every sampled file gone, edited or unreadable — the drill is
+inconclusive, which is also not a pass.
+
+By default the sample is taken from your home directory inside the snapshot,
+because a backup holds the whole machine and the files you care about are yours.
+The restore always lands in a directory the drill makes for itself, so --target
+is a place to put that directory, never a place it writes into directly.
 
 Every drill writes a receipt under the state directory; restorable history lists
 them.
@@ -80,11 +88,13 @@ Examples
   restorable drill                    drill the freshest destination
   restorable drill --count 40         sample more files
   restorable drill --dest "backup disk"
+  restorable drill --path ~/Documents
   restorable drill --keep --target /tmp/drill
   restorable drill --json
 
 Flags
   --dest NAME      which destination to drill (default: the freshest readable one)
+  --path DIR       sample from this part of the snapshot (default: your home directory)
   --count N        how many files to sample (default 12)
   --seed N         sample the same files again
   --max-size SIZE  skip files larger than this (default 32MB)

@@ -72,6 +72,8 @@ func printDoctor(rep app.Doctor) {
 		switch {
 		case h.NotUsed:
 			state = s.Dim("not used")
+		case d.State == backend.StateOK && !d.Connected:
+			state = s.Yellow("not connected")
 		case d.State == backend.StateLocked:
 			state = s.Yellow("locked")
 		case d.State == backend.StateUnreachable:
@@ -110,7 +112,7 @@ func printDoctor(rep app.Doctor) {
 			continue
 		}
 		if h.Problem == app.NoBackupSystem {
-			fmt.Printf("  %s %s\n", s.Red("✗"), h.Problem)
+			fmt.Printf("  %s %s\n", s.Red("✗"), ui.Safe(h.Problem))
 			fmt.Printf("    %s\n", s.Dim(noBackupHint()))
 			continue
 		}
@@ -121,7 +123,7 @@ func printDoctor(rep app.Doctor) {
 		if where == "" {
 			where = string(h.Dest.Backend)
 		}
-		fmt.Printf("  %s %s: %s\n", s.Red("✗"), ui.Path(where, max(20, width/3)), h.Problem)
+		fmt.Printf("  %s %s: %s\n", s.Red("✗"), ui.Path(where, max(20, width/3)), ui.Safe(h.Problem))
 		if hint := doctorHint(h); hint != "" {
 			fmt.Printf("    %s\n", s.Dim(hint))
 		}

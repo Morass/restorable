@@ -108,11 +108,15 @@ func TestAFileEditedAfterTheSnapshotIsNotAFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !rec.Pass {
-		t.Errorf("an ordinary edit must not fail the drill: %+v", rec.Files)
-	}
 	if st, _ := statusOf(rec, filepath.Join(root, "a.txt")); st != drill.ChangedSince {
 		t.Errorf("status = %q, want changed-since", st)
+	}
+	// Nothing was caught out, but nothing was proved either: that is not a pass.
+	if !rec.Inconclusive {
+		t.Error("a sample of only edited files is inconclusive, not a failure")
+	}
+	if rec.Pass {
+		t.Error("a drill that compared nothing must not pass")
 	}
 }
 
@@ -127,11 +131,11 @@ func TestAFileNoLongerOnDiskIsNotAFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !rec.Pass {
-		t.Errorf("a file only the backup still has must not fail the drill: %+v", rec.Files)
-	}
 	if st, _ := statusOf(rec, filepath.Join(root, "gone.txt")); st != drill.GoneLive {
 		t.Errorf("status = %q, want gone-from-disk", st)
+	}
+	if !rec.Inconclusive {
+		t.Error("a file only the backup has proves nothing either way: inconclusive")
 	}
 }
 
@@ -246,8 +250,14 @@ func TestRestoredCopiesAreRemovedUnlessKept(t *testing.T) {
 	if !rec.Pass {
 		t.Fatalf("drill failed: %+v", rec.Files)
 	}
-	if _, err := os.Stat(filepath.Join(target, root[1:], "a.txt")); err != nil {
-		t.Errorf("--keep must leave the restored copy: %v", err)
+	// The restore lands in a directory the drill made inside the target, never
+	// straight into a directory the user named.
+	matches, err := filepath.Glob(filepath.Join(target, "restorable-drill-*", root[1:], "a.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 {
+		t.Errorf("--keep must leave the restored copy under its own directory; found %v", matches)
 	}
 
 	// Without a target, the temporary directory must not survive the drill.
@@ -304,4 +314,86 @@ func (n noWalker) List(ctx context.Context, d backend.Destination, s, p string) 
 }
 func (n noWalker) Restore(ctx context.Context, d backend.Destination, s string, f []string, t string) error {
 	return n.b.Restore(ctx, d, s, f, t)
+}
+
+func TestAScopeThatTheSnapshotSpellsDifferentlyStillWorks(t *testing.T) {
+	// The snapshot holds /private/tmp/..., the caller asks about /tmp/...:
+	// the same directory on a Mac, spelled the way it was typed.
+	root := t.TempDir()
+	content := map[string][]byte{
+		"/private" + root + "/a.txt": []byte("aaa"),
+	}
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("aaa"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	b := fake.New(backend.Restic, "repo", []string{"/private" + root}, "snap1", content)
+	b.Snaps[0].Time = time.Now().Add(-time.Hour)
+
+	rec, err := drill.Run(context.Background(), b, b.Dest, b.Snaps[0], drill.Options{Count: 5, Seed: 1, Path: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.Files) != 1 {
+		t.Fatalf("sampled %d files, want the one the snapshot holds (%+v)", len(rec.Files), rec)
+	}
+	if rec.Note != "" && !strings.Contains(rec.Note, "kept") {
+		t.Errorf("note = %q, want no complaint: the other spelling was found", rec.Note)
+	}
+}
+
+func TestAScopeAboveWhatTheSnapshotHoldsSamplesThoseRoots(t *testing.T) {
+	// The snapshot holds ~/Documents and ~/code; the drill is asked for ~. A
+	// listing of a path above the snapshot's own roots does not walk into them,
+	// so the scope has to become the roots themselves.
+	root := t.TempDir()
+	docs := filepath.Join(root, "Documents")
+	code := filepath.Join(root, "code")
+	content := map[string][]byte{}
+	for _, p := range []string{filepath.Join(docs, "a.txt"), filepath.Join(code, "b.go")} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("xx"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		content[p] = []byte("xx")
+	}
+	b := fake.New(backend.Restic, "repo", []string{docs, code}, "snap1", content)
+	b.Snaps[0].Time = time.Now().Add(-time.Hour)
+
+	rec, err := drill.Run(context.Background(), b, b.Dest, b.Snaps[0], drill.Options{Count: 10, Seed: 4, Path: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.Files) != 2 {
+		t.Fatalf("sampled %d files, want both roots walked: %+v", len(rec.Files), rec)
+	}
+	if rec.Note != "" {
+		t.Errorf("note = %q, want none: the scope was resolved, not abandoned", rec.Note)
+	}
+	if !rec.Pass {
+		t.Errorf("drill failed: %+v", rec.Files)
+	}
+}
+
+func TestAScopeWithNothingInCommonSamplesTheWholeSnapshot(t *testing.T) {
+	root := t.TempDir()
+	file := filepath.Join(root, "a.txt")
+	if err := os.WriteFile(file, []byte("xx"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	b := fake.New(backend.Restic, "repo", []string{root}, "snap1", map[string][]byte{file: []byte("xx")})
+	b.Snaps[0].Time = time.Now().Add(-time.Hour)
+
+	rec, err := drill.Run(context.Background(), b, b.Dest, b.Snaps[0],
+		drill.Options{Count: 5, Seed: 4, Path: "/somewhere/else/entirely"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.Files) != 1 {
+		t.Fatalf("sampled %d files, want the fallback to the whole snapshot", len(rec.Files))
+	}
+	if rec.Note == "" {
+		t.Error("falling back to the whole snapshot must be said out loud")
+	}
 }

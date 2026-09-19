@@ -119,9 +119,36 @@ func Duration(d time.Duration) string {
 	}
 }
 
+// Safe makes a string from the filesystem or from a backup safe to print: a file
+// name can hold escape sequences, and printing those lets a crafted name repaint
+// the terminal or hide what the tool just said.
+func Safe(s string) string {
+	needs := false
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			needs = true
+			break
+		}
+	}
+	if !needs {
+		return s
+	}
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f):
+			fmt.Fprintf(&b, "\\x%02x", r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
 // Path shortens a path for a terminal: home becomes ~, and a very long path
 // loses its middle rather than its end, because the end is the useful part.
 func Path(p string, width int) string {
+	p = Safe(p)
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		if p == home {
 			p = "~"

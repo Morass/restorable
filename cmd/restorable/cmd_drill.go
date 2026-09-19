@@ -7,6 +7,8 @@ import (
 	"os"
 	"time"
 
+	"github.com/morass/restorable/internal/config"
+
 	"github.com/morass/restorable/internal/app"
 	"github.com/morass/restorable/internal/drill"
 	"github.com/morass/restorable/internal/ui"
@@ -22,6 +24,7 @@ func cmdDrill(ctx context.Context, a *app.App, args []string) (int, error) {
 		target  = fs.String("target", "", "restore into this directory")
 		keep    = fs.Bool("keep", false, "keep the restored copies")
 		asJSON  = fs.Bool("json", false, "print JSON")
+		path    = fs.String("path", "", "sample from this directory of the snapshot (default: your home directory)")
 	)
 	if code, done := parse(fs, args); done {
 		return code, nil
@@ -34,6 +37,20 @@ func cmdDrill(ctx context.Context, a *app.App, args []string) (int, error) {
 		return exitUsage, fmt.Errorf("--count must be at least 1")
 	}
 
+	scope := *path
+	if scope == "" {
+		// A backup holds the whole machine; a drill is about the user's own files.
+		if home, err := os.UserHomeDir(); err == nil {
+			scope = home
+		}
+	} else {
+		expanded, err := config.ExpandPath(scope)
+		if err != nil {
+			return exitUsage, err
+		}
+		scope = expanded
+	}
+
 	pair, snap, err := a.Drillable(ctx, *dest)
 	if err != nil {
 		return exitProblem, err
@@ -44,10 +61,13 @@ func cmdDrill(ctx context.Context, a *app.App, args []string) (int, error) {
 		if where == "" {
 			where = pair.Dest.ID
 		}
-		fmt.Printf("%s %s %s %s\n", s.Bold("Drilling"), where,
-			s.Dim("snapshot"), fmt.Sprintf("%s (%s)", snap.ID, ui.Age(time.Since(snap.Time))))
+		fmt.Printf("%s %s %s %s\n", s.Bold("Drilling"), ui.Safe(where),
+			s.Dim("snapshot"), fmt.Sprintf("%s (%s)", ui.Safe(snap.ID), ui.Age(time.Since(snap.Time))))
+		if scope != "" {
+			fmt.Printf("  %s\n", s.Dim("sampling files under "+ui.Path(scope, 60)))
+		}
 	}
-	opts := drill.Options{Count: *count, Seed: *seed, MaxBytes: maxBytes, Target: *target, Keep: *keep}
+	opts := drill.Options{Count: *count, Seed: *seed, MaxBytes: maxBytes, Target: *target, Keep: *keep, Path: scope}
 	if !*asJSON {
 		opts.Progress = func(msg string) { fmt.Printf("  %s\n", s.Dim(msg)) }
 	}
@@ -102,11 +122,11 @@ func printDrill(rec drill.Receipt, receiptPath string, askedSeed bool) {
 	fmt.Println()
 	for _, f := range rec.Files {
 		if f.Status.Bad() && f.Detail != "" {
-			fmt.Printf("    %s %s: %s\n", s.Red("✗"), ui.Path(f.Path, max(20, width-50)), f.Detail)
+			fmt.Printf("    %s %s: %s\n", s.Red("✗"), ui.Path(f.Path, max(20, width-50)), ui.Safe(f.Detail))
 		}
 	}
 	if rec.Note != "" {
-		fmt.Printf("  %s\n", s.Dim(rec.Note))
+		fmt.Printf("  %s\n", s.Dim(ui.Safe(rec.Note)))
 	}
 	sampled := fmt.Sprintf("%d files sampled in %s", len(rec.Files), app.Round(rec.Duration))
 	if askedSeed {

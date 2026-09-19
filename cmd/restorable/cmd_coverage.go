@@ -141,7 +141,7 @@ func printCoverage(rep coverage.Report) {
 				fmt.Printf("  %s\n", s.Dim(fmt.Sprintf("… and %d more", len(unreadable)-5)))
 				break
 			}
-			fmt.Printf("  %s — %s\n", ui.Path(f.Path, width-40), s.Dim(f.Detail))
+			fmt.Printf("  %s — %s\n", ui.Path(f.Path, width-40), s.Dim(ui.Safe(f.Detail)))
 		}
 	}
 	if len(skipped) > 0 {
@@ -161,9 +161,9 @@ func reasonText(s ui.Style, f coverage.Finding) string {
 		if f.Detail == "" || f.Detail == "no backup destination covers this path" {
 			return s.Red("no backup keeps it")
 		}
-		return s.Red("no backup") + " — " + f.Detail
+		return s.Red("no backup") + " — " + ui.Safe(f.Detail)
 	case coverage.Excluded:
-		return s.Yellow("excluded") + " — " + f.Detail
+		return s.Yellow("excluded") + " — " + ui.Safe(f.Detail)
 	default:
 		return f.Detail
 	}
@@ -181,6 +181,13 @@ func destLine(s ui.Style, d backend.Destination, width int) string {
 	switch d.State {
 	case backend.StateOK:
 		when := "never completed"
+		if !d.Connected {
+			if !d.LastOK.IsZero() {
+				return head + "  " + s.Yellow("not connected") + "  " +
+					s.Dim("last backup "+ui.Age(time.Since(d.LastOK))+" ("+d.LastOKSource+")")
+			}
+			return head + "  " + s.Yellow("not connected") + "  " + s.Dim("nothing is being kept to it right now")
+		}
 		if !d.LastOK.IsZero() {
 			when = ui.Age(time.Since(d.LastOK))
 			if d.LastOKSource != "" {
@@ -189,11 +196,11 @@ func destLine(s ui.Style, d backend.Destination, width int) string {
 		}
 		return head + "  " + s.Green("readable") + "  " + s.Dim(when)
 	case backend.StateLocked:
-		return head + "  " + s.Yellow("locked") + "  " + s.Dim(d.Err)
+		return head + "  " + s.Yellow("locked") + "  " + s.Dim(ui.Safe(d.Err))
 	case backend.StateUnreachable:
-		return head + "  " + s.Red("not there") + "  " + s.Dim(d.Err)
+		return head + "  " + s.Red("not there") + "  " + s.Dim(ui.Safe(d.Err))
 	default:
-		return head + "  " + s.Red("error") + "  " + s.Dim(d.Err)
+		return head + "  " + s.Red("error") + "  " + s.Dim(ui.Safe(d.Err))
 	}
 }
 

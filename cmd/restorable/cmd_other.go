@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/morass/restorable/internal/app"
@@ -57,7 +58,7 @@ func cmdHistory(args []string) (int, error) {
 		files := fmt.Sprintf("%d/%d", counts[drill.Match], len(r.Files))
 		t.Rows = append(t.Rows, []string{
 			r.RanAt.Local().Format("2006-01-02 15:04"), result, string(r.Backend),
-			ui.Path(where, max(18, width/4)), r.Snapshot, files,
+			ui.Path(where, max(18, width/4)), ui.Safe(r.Snapshot), files,
 		})
 	}
 	fmt.Print(t.String())
@@ -101,6 +102,9 @@ func cmdBackends(ctx context.Context, a *app.App, args []string) (int, error) {
 		if p.Dest.Snapshots > 0 {
 			fmt.Printf("  %s %d\n", s.Dim("snapshots"), p.Dest.Snapshots)
 		}
+		if p.Dest.Note != "" {
+			fmt.Printf("  %s\n", s.Dim(ui.Safe(p.Dest.Note)))
+		}
 	}
 	if cfgPath := a.Config.Path(); cfgPath != "" {
 		fmt.Printf("\n%s\n", s.Dim("configuration: "+ui.Path(cfgPath, width-20)))
@@ -126,13 +130,23 @@ func cmdConfig(args []string) (int, error) {
 	case *example:
 		fmt.Print(config.Example)
 	case *write:
-		if _, err := os.Stat(path); err == nil {
-			return exitProblem, fmt.Errorf("%s already exists; edit it instead", path)
-		}
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			return exitError, err
 		}
-		if err := os.WriteFile(path, []byte(config.Example), 0o600); err != nil {
+		// Exclusive and not through a symlink: a file that is already there —
+		// even a dangling link — is the user's, and is never written over.
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+		if err != nil {
+			if os.IsExist(err) {
+				return exitProblem, fmt.Errorf("%s already exists; edit it instead", path)
+			}
+			return exitError, err
+		}
+		if _, err := f.WriteString(config.Example); err != nil {
+			f.Close()
+			return exitError, err
+		}
+		if err := f.Close(); err != nil {
 			return exitError, err
 		}
 		fmt.Printf("wrote %s\n", path)
