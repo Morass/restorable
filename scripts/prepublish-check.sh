@@ -72,5 +72,11 @@ if [ -s .git/info/private-patterns ]; then
 	fi
 fi
 
+# The licence is part of publishing: an unfilled template placeholder is not a
+# privacy leak, but it ships a repository that says "Copyright (c) YEAR".
+if [ -f LICENSE ] && grep -q 'Copyright (c) YEAR' LICENSE; then
+	hit "LICENSE still has the template's YEAR placeholder"
+fi
+
 [ "$fail" = 0 ] && echo "✓ nothing personal or private found"
 exit "$fail"
