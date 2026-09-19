@@ -23,8 +23,8 @@ func cmdDrill(ctx context.Context, a *app.App, args []string) (int, error) {
 		keep    = fs.Bool("keep", false, "keep the restored copies")
 		asJSON  = fs.Bool("json", false, "print JSON")
 	)
-	if err := fs.Parse(args); err != nil {
-		return exitUsage, nil
+	if code, done := parse(fs, args); done {
+		return code, nil
 	}
 	maxBytes, err := parseSize(*maxSize)
 	if err != nil {

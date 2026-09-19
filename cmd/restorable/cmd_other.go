@@ -19,8 +19,8 @@ func cmdHistory(args []string) (int, error) {
 	fs := newFlagSet("history")
 	limit := fs.Int("limit", 20, "how many receipts to show")
 	asJSON := fs.Bool("json", false, "print JSON")
-	if err := fs.Parse(args); err != nil {
-		return exitUsage, nil
+	if code, done := parse(fs, args); done {
+		return code, nil
 	}
 	rs, err := state.Receipts(*limit)
 	if err != nil {
@@ -67,8 +67,8 @@ func cmdHistory(args []string) (int, error) {
 func cmdBackends(ctx context.Context, a *app.App, args []string) (int, error) {
 	fs := newFlagSet("backends")
 	asJSON := fs.Bool("json", false, "print JSON")
-	if err := fs.Parse(args); err != nil {
-		return exitUsage, nil
+	if code, done := parse(fs, args); done {
+		return code, nil
 	}
 	pairs, err := a.Destinations(ctx)
 	if err != nil {
@@ -114,8 +114,8 @@ func cmdConfig(args []string) (int, error) {
 	showPath := fs.Bool("path", false, "print the configuration path")
 	example := fs.Bool("example", false, "print an example configuration")
 	write := fs.Bool("write", false, "write the example configuration if there is none")
-	if err := fs.Parse(args); err != nil {
-		return exitUsage, nil
+	if code, done := parse(fs, args); done {
+		return code, nil
 	}
 	path, err := config.File()
 	if err != nil {

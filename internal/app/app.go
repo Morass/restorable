@@ -24,6 +24,9 @@ type App struct {
 	Runner   run.Runner
 	Version  string
 	Backends []backend.Backend
+	// StaleOverride replaces the configured staleness threshold when the command
+	// line asked for a different one.
+	StaleOverride time.Duration
 }
 
 // New builds the app from a configuration, including only the backends this
@@ -99,13 +102,22 @@ type Doctor struct {
 	Problems    int           `json:"problems"`
 }
 
+// StaleAfter is how old a backup may be before doctor complains: the override
+// the command line was given, or the configured number of hours.
+func (a *App) StaleAfter() time.Duration {
+	if a.StaleOverride > 0 {
+		return a.StaleOverride
+	}
+	return time.Duration(a.Config.StaleAfterHours) * time.Hour
+}
+
 // Doctor judges every destination: readable, fresh, and drilled at some point.
 func (a *App) Doctor(ctx context.Context, now time.Time) (Doctor, error) {
 	pairs, err := a.Destinations(ctx)
 	if err != nil {
 		return Doctor{}, err
 	}
-	stale := time.Duration(a.Config.StaleAfterHours) * time.Hour
+	stale := a.StaleAfter()
 	rep := Doctor{GeneratedAt: now, StaleAfter: stale}
 	if len(pairs) == 0 {
 		rep.Problems++

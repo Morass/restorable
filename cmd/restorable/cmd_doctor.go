@@ -16,14 +16,11 @@ func cmdDoctor(ctx context.Context, a *app.App, args []string) (int, error) {
 	fs := newFlagSet("doctor")
 	asJSON := fs.Bool("json", false, "print JSON")
 	staleAfter := fs.Duration("stale-after", 0, "when a backup counts as stale")
-	if err := fs.Parse(args); err != nil {
-		return exitUsage, nil
+	if code, done := parse(fs, args); done {
+		return code, nil
 	}
 	if *staleAfter > 0 {
-		a.Config.StaleAfterHours = int((*staleAfter).Hours())
-		if a.Config.StaleAfterHours < 1 {
-			a.Config.StaleAfterHours = 1
-		}
+		a.StaleOverride = *staleAfter
 	}
 	rep, err := a.Doctor(ctx, time.Now())
 	if err != nil {

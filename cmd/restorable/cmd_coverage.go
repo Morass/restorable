@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -28,12 +29,17 @@ func cmdCoverage(ctx context.Context, a *app.App, args []string) (int, error) {
 		strict = fs.Bool("strict", false, "exit 1 when unprotected data was found")
 		quiet  = fs.Bool("quiet", false, "no progress line")
 	)
-	if err := fs.Parse(args); err != nil {
-		return exitUsage, nil
+	if code, done := parse(fs, args); done {
+		return code, nil
 	}
 	min, err := parseSize(*minSz)
 	if err != nil {
 		return exitUsage, err
+	}
+	// --min-size keeps a terminal table readable. JSON is read by a program, so
+	// unless the size was asked for explicitly every hole is listed.
+	if *asJSON && !flagGiven(fs, "min-size") {
+		min = 0
 	}
 	opts := coverage.Options{
 		MaxDepth: *depth, MinBytes: min, CheckFiles: *files,
@@ -208,6 +214,31 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// flagGiven reports whether a flag was set on the command line.
+func flagGiven(fs *flag.FlagSet, name string) bool {
+	found := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			found = true
+		}
+	})
+	return found
+}
+
+// parse reads the flags and says whether the command should stop: asking for
+// help is not a usage error, and a bad flag has already been reported.
+func parse(fs *flag.FlagSet, args []string) (int, bool) {
+	err := fs.Parse(args)
+	switch {
+	case err == nil:
+		return exitOK, false
+	case errors.Is(err, flag.ErrHelp):
+		return exitOK, true
+	default:
+		return exitUsage, true
+	}
 }
 
 func newFlagSet(name string) *flag.FlagSet {

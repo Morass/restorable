@@ -74,6 +74,8 @@ type Report struct {
 	// CheckedFiles says whether individual files were asked about, or only
 	// directories, because that changes what the report can promise.
 	CheckedFiles bool `json:"checked_files"`
+	// MinBytes is the size below which a hole was counted but not listed.
+	MinBytes int64 `json:"min_bytes"`
 }
 
 // Options control the walk.
@@ -107,6 +109,23 @@ var protectedLocations = []string{
 	"Library/Metadata/CoreSpotlight", "Library/Sharing", "Library/Trial",
 }
 
+// repositoryPaths collects the local directories the destinations themselves
+// live in: a backup repository does not need backing up, and reporting it as a
+// hole would be noise in every single run.
+func repositoryPaths(protectors []*Protector) []string {
+	var out []string
+	for _, p := range protectors {
+		id := p.Dest.ID
+		if id == "" || strings.Contains(id, ":") && !filepath.IsAbs(id) {
+			continue // a remote repository (sftp:, s3:, rest:) is not on this disk
+		}
+		if filepath.IsAbs(id) {
+			out = append(out, filepath.Clean(id))
+		}
+	}
+	return out
+}
+
 // Run walks the roots and reports the holes.
 func Run(ctx context.Context, opts Options, protectors []*Protector) (Report, error) {
 	if opts.MaxDepth <= 0 {
@@ -118,11 +137,11 @@ func Run(ctx context.Context, opts Options, protectors []*Protector) (Report, er
 		}
 	}
 	start := time.Now()
-	rep := Report{GeneratedAt: start, Roots: opts.Roots, CheckedFiles: opts.CheckFiles}
+	rep := Report{GeneratedAt: start, Roots: opts.Roots, CheckedFiles: opts.CheckFiles, MinBytes: opts.MinBytes}
 	for _, p := range protectors {
 		rep.Destinations = append(rep.Destinations, p.Dest)
 	}
-	w := &walker{opts: opts, protectors: protectors, rep: &rep}
+	w := &walker{opts: opts, protectors: protectors, rep: &rep, repos: repositoryPaths(protectors)}
 
 	home, _ := os.UserHomeDir()
 	w.home = home
@@ -160,6 +179,18 @@ type walker struct {
 	rep        *Report
 	home       string
 	rootDev    uint64
+	repos      []string
+}
+
+// isRepository reports whether a path is a backup repository this tool reads.
+func (w *walker) isRepository(path string) bool {
+	clean := filepath.Clean(path)
+	for _, r := range w.repos {
+		if clean == r {
+			return true
+		}
+	}
+	return false
 }
 
 // visit decides what to do with one directory: walk it when a backup keeps it,
@@ -376,6 +407,11 @@ func (w *walker) dir(ctx context.Context, path string, depth int) (int64, int, e
 	}
 
 	for _, sub := range subdirs {
+		if w.isRepository(sub) {
+			w.addFinding(Finding{Path: sub, Kind: Skipped,
+				Detail: "a backup repository, which does not need backing up itself"}, false)
+			continue
+		}
 		if w.skipLocation(sub) {
 			w.addFinding(Finding{Path: sub, Kind: Skipped,
 				Detail: "a folder macOS guards behind a permission prompt (use --all to include it)"}, false)
